@@ -3,7 +3,7 @@
 # Runs daily, compares the latest akash-network/provider release tag against the
 # UPSTREAM_TAG pin, and opens a rebase PR when a newer release exists. The fork
 # must stay tiny against upstream's ~3-week cadence (docs/fork-automation.md);
-# this workflow is the "fully automatable" half. The auto-merge.yml workflow
+# this workflow is the "fully automatable" half. The auto-merge.yaml workflow
 # decides whether the resulting PR may merge unattended.
 #
 # This workflow does NOT bump UPSTREAM_TAG — the rebase PR's own diff carries
@@ -13,8 +13,8 @@
 # (secret REBASE_PAT), not the default GITHUB_TOKEN. Two reasons:
 #  (1) the Digital-Frontier-LDA org disallows Actions creating PRs with
 #      GITHUB_TOKEN; (2) a PR opened by GITHUB_TOKEN does not trigger
-#      pull_request workflows (GitHub's recursion guard) — so ci.yml and
-#      auto-merge.yml would never run on the rebase PR. The PAT fixes both.
+#      pull_request workflows (GitHub's recursion guard) — so ci.yaml and
+#      auto-merge.yaml would never run on the rebase PR. The PAT fixes both.
 # REBASE_PAT must be a fine-grained PAT scoped to this repo with
 # Contents: read/write + Pull requests: read/write.
 name: upstream-watch
@@ -38,7 +38,7 @@ jobs:
         with:
           fetch-depth: 0
           # PAT so the pushed branch + PR are attributed to the PAT identity —
-          # required for the rebase PR to trigger ci.yml / auto-merge.yml.
+          # required for the rebase PR to trigger ci.yaml / auto-merge.yaml.
           token: ${{ secrets.REBASE_PAT }}
 
       - name: Detect new upstream release and open a rebase PR
@@ -96,7 +96,7 @@ jobs:
           if [ "${REBASE_STATUS}" = "clean" ]; then
             BODY=$(printf '%s\n\n%s\n\n%s\n' \
               "Automated rebase onto upstream akash-network/provider \`${LATEST}\`." \
-              "The \`df-telemetry/\` tree-hash guard and \`ci.yml\` checks gate whether this merges unattended (see auto-merge.yml). This PR also bumps \`UPSTREAM_TAG\`." \
+              "The \`df-telemetry/\` tree-hash guard and \`ci.yaml\` checks gate whether this merges unattended (see auto-merge.yaml). This PR also bumps \`UPSTREAM_TAG\`." \
               "### Upstream release notes (${LATEST})
           ${NOTES}")
             gh pr create --base main --head "${BRANCH}" \
