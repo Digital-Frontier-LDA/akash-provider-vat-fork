@@ -3,8 +3,6 @@ package dftelemetry
 import (
 	"log"
 	"net"
-	"os"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -111,24 +109,19 @@ var (
 // Shared returns the process-wide Emitter, initialised exactly once.
 //
 // Telemetry config failure must NEVER crash the provider (CLAUDE.md guardrail
-// #3): if the environment is misconfigured, Shared still returns a working
-// Emitter pointed at the default socket — it simply drops every event when no
-// sidecar is present. The config error is logged once.
+// #3): if Config.Load reports a misconfiguration, Shared still returns a
+// working Emitter — it uses the (possibly default) socket path and channel
+// capacity from the partially-loaded Config and simply drops every event when
+// no sidecar is present. The config error is logged once.
 func Shared() *Emitter {
 	sharedOnce.Do(func() {
-		socket := os.Getenv("DF_TELEMETRY_SOCKET")
-		if socket == "" {
-			socket = defaultSocketPath
+		cfg, err := Load()
+		if err != nil {
+			// Fail open: a config error never crashes the provider. Load
+			// still returns usable socket/capacity defaults on its Config.
+			log.Printf("df-telemetry: config error (%v) — emitter will fail open", err)
 		}
-		capacity := defaultChannelCapacity
-		if v := os.Getenv("DF_TELEMETRY_CHANNEL_CAPACITY"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				capacity = n
-			} else {
-				log.Printf("df-telemetry: invalid DF_TELEMETRY_CHANNEL_CAPACITY %q, using default %d", v, defaultChannelCapacity)
-			}
-		}
-		sharedEm = New(socket, capacity)
+		sharedEm = New(cfg.SocketPath, cfg.ChannelCapacity)
 	})
 	return sharedEm
 }
