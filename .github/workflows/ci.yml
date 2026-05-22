@@ -1,0 +1,98 @@
+# Digital Frontier VAT fork — CI test gate.
+#
+# Runs the df-telemetry unit + chaos tests and the kind smoke test on every
+# push and pull request. This is the test gate Plan 05's auto-merge.yml depends
+# on: a rebase PR may only auto-merge when the df-telemetry-tests and kind-smoke
+# checks here are green (and the tree-hash guard passes).
+#
+# Fail-closed: no step swallows its own failure.
+name: ci
+
+on:
+  push:
+    branches: [main, 'rebase/**']
+  pull_request: {}
+  workflow_call: {}
+
+jobs:
+  df-telemetry-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Assert rerere/guard configuration (CI-03 / FORK-06)
+        run: bash scripts/check-rerere-config.sh
+
+      - name: Build df-telemetry + gateway
+        # The telemetry hook surface. `go build ./...` for the whole fork can be
+        # blocked by upstream dependency-version skew in a dependency's _test.go
+        # helper (pre-existing, not introduced here); building the hook surface
+        # explicitly proves the wired gateway + df-telemetry package compile.
+        run: go build ./df-telemetry/... ./gateway/...
+
+      - name: Vet df-telemetry
+        run: go vet ./df-telemetry/...
+
+      - name: Test df-telemetry (race detector — concurrent emitter)
+        # -race needs CGO; ubuntu-latest has gcc. Runs emitter, sourceip,
+        # config, middleware, eventtype AND the fail-open chaos test.
+        run: go test ./df-telemetry/... -race -v
+
+  kind-smoke:
+    runs-on: ubuntu-latest
+    needs: df-telemetry-tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Boot kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.31.0
+          cluster_name: df-telemetry-smoke
+          config: scripts/smoke/kind-config.yaml
+
+      - name: Run the kind smoke test
+        # MP-02: provider identity is set explicitly so the smoke test is
+        # provider-parameterised, not relying on defaults.
+        env:
+          DF_PROVIDER_ID: ci-smoke-provider
+          DF_PROVIDER_WALLET: akash1cismokeproviderwallet
+          DF_PROVIDER_REGION: ci-eu
+          DF_PROVIDER_SITE: ci-1
+          DF_SMOKE_KEEP_CLUSTER: '1'
+        run: bash scripts/smoke/run-smoke.sh
+
+      - name: Upload smoke artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-smoke-debug
+          path: |
+            /tmp/df-smoke-ndjson.log
+          if-no-files-found: ignore
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: [df-telemetry-tests, kind-smoke]
+    steps:
+      - name: Summary
+        run: |
+          echo "PASS: df-telemetry units + kind smoke green"
