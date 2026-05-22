@@ -1,0 +1,95 @@
+# Digital Frontier VAT fork — gated auto-merge of upstream rebase PRs.
+#
+# A rebase PR (opened by upstream-watch.yml) merges UNATTENDED only when BOTH:
+#   1. the df-telemetry/ tree hash is unchanged between the pre-rebase fork and
+#      the rebased branch — the rebase did not touch our hook; AND
+#   2. ci.yml's checks (df-telemetry-tests, kind-smoke) are green.
+#
+# FORK-06/CI-03 enforcement. git rerere cannot be path-scoped, so the
+# df-telemetry/ tree-hash guard is the real protection: a rerere auto-resolution
+# (or any rebase change) that touches df-telemetry/ alters that tree hash, the
+# guard fires, the PR is labelled needs-human, and the merge is blocked.
+#
+# Fail-closed: no step swallows its own failure. The default outcome whenever
+# anything is uncertain is "do not auto-merge".
+name: auto-merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  check_suite:
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+jobs:
+  # tree-hash-guard is a REQUIRED STATUS CHECK. Branch protection (configured by
+  # the Plan 05 Task 4 human checkpoint) blocks the merge when this job fails.
+  tree-hash-guard:
+    runs-on: ubuntu-latest
+    # Only the rebase PRs opened by upstream-watch.yml are in scope.
+    if: startsWith(github.event.pull_request.head.ref, 'rebase/')
+    steps:
+      - name: Checkout fork (full history for the tree comparison)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assert rerere/guard configuration (CI-03 / FORK-06)
+        run: bash scripts/check-rerere-config.sh
+
+      - name: Guard — df-telemetry/ tree hash unchanged by the rebase
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Compare the PR base (the fork before the rebase) against the PR head
+          # (the rebased branch). A difference means the rebase modified our
+          # hook -> label needs-human and fail the required check.
+          if bash scripts/df-telemetry-treehash.sh --compare \
+               "origin/${{ github.base_ref }}" \
+               "${{ github.event.pull_request.head.sha }}"; then
+            echo "Guard passed: df-telemetry/ untouched by this rebase."
+          else
+            echo "Guard tripped: df-telemetry/ changed — human review required."
+            gh pr edit "${{ github.event.pull_request.number }}" \
+              --add-label needs-human \
+              --add-label "conflict:our-hook"
+            exit 1
+          fi
+
+  # auto-merge enables GitHub auto-merge only after the guard passed AND the
+  # ci.yml checks are green. The --auto flag means GitHub completes the squash
+  # merge once every required check (tree-hash-guard, df-telemetry-tests,
+  # kind-smoke) succeeds.
+  auto-merge:
+    runs-on: ubuntu-latest
+    needs: tree-hash-guard
+    if: startsWith(github.event.pull_request.head.ref, 'rebase/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require ci.yml checks green, then enable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Gate on Plan 04's ci.yml job names. gh pr checks exits non-zero if
+          # any check failed or is still pending — fail-closed: an uncertain
+          # state never merges.
+          CHECKS=$(gh pr checks "${PR}" --json name,state \
+            --jq '.[] | select(.name=="df-telemetry-tests" or .name=="kind-smoke")')
+          echo "${CHECKS}"
+          if echo "${CHECKS}" | grep -q '"state":"FAILURE"'; then
+            echo "A required ci.yml check failed — not merging."
+            gh pr edit "${PR}" --add-label needs-human || true
+            exit 1
+          fi
+          # Enable auto-merge: GitHub squash-merges once all required checks pass.
+          gh pr merge "${PR}" --auto --squash
+          echo "Auto-merge enabled for PR #${PR} (squash, once all required checks pass)."
