@@ -27,7 +27,7 @@ import (
 // harness".)
 //
 // Build-tagged `smoke` so it is excluded from the default unit run
-// (the df-telemetry-tests CI job) and invoked explicitly by the ci.yml
+// (the df-telemetry-tests CI job) and invoked explicitly by the ci.yaml
 // kind-smoke job: `go test -tags smoke -run TestSmoke ./df-telemetry/...`.
 func TestSmoke_EndToEndControlPlaneRequests(t *testing.T) {
 	// MP-02: provider identity is parameterised, never hardcoded. CI sets the
