@@ -1,0 +1,58 @@
+# Digital Frontier VAT fork — tree-hash guard self-test.
+#
+# Executable proof of FORK-05's deliberate-conflict requirement: the auto-merge
+# guard "refuses to auto-merge when the directory hash of df-telemetry/ changes
+# — verified by a deliberate-conflict test fixture."
+#
+# The self-test builds two fixtures (one that touches df-telemetry/, one that
+# does not) and asserts the tree-hash guard BLOCKS the former and ALLOWS the
+# latter. Running on pull_request means a change to the guard scripts is itself
+# guard-tested.
+#
+# Fail-closed: no step swallows its own failure.
+name: rebase-guard-selftest
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  guard-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history — the guard compares trees across refs)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build the deliberate-conflict fixtures
+        run: bash scripts/conflict-fixture/make-fixture.sh
+
+      - name: Assert the guard BLOCKS a df-telemetry/-touching rebase
+        run: |
+          set -euo pipefail
+          if bash scripts/df-telemetry-treehash.sh --compare main df-fixture/overlapping; then
+            echo "FAIL: the guard did NOT block a df-telemetry/-touching change"
+            exit 1
+          else
+            echo "OK: the guard blocked the df-telemetry/-overlapping fixture"
+          fi
+
+      - name: Assert the guard ALLOWS a non-overlapping rebase
+        run: |
+          set -euo pipefail
+          if bash scripts/df-telemetry-treehash.sh --compare main df-fixture/non-overlapping; then
+            echo "OK: the guard allowed the non-overlapping fixture"
+          else
+            echo "FAIL: the guard blocked a clean (non-df-telemetry/) change"
+            exit 1
+          fi
+
+      - name: Clean up the fixtures
+        run: bash scripts/conflict-fixture/clean-fixture.sh
+
+      - name: Summary
+        run: |
+          echo "PASS: tree-hash guard blocks df-telemetry/ changes and allows clean rebases (FORK-05)"
