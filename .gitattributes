@@ -1,0 +1,9 @@
+# df-telemetry/ is Digital Frontier's hook payload. A rebase that touches it
+# MUST be human-reviewed — enforced by scripts/df-telemetry-treehash.sh in
+# auto-merge.yml, NOT by this file. This marker exists for human signposting
+# only: a `merge=ours` driver would silently keep our version, which is exactly
+# the silent-failure mode the tree-hash guard exists to prevent.
+df-telemetry/** -merge=ours
+
+# Shell scripts and the smoke harness run on Linux CI runners — keep LF.
+*.sh text eol=lf
