@@ -6,7 +6,7 @@
 # df-telemetry/ is human-gated and never silently auto-resolved:
 #   (1) rerere.autoupdate is OFF  -> no recorded resolution is ever silently staged
 #   (2) the df-telemetry/ tree-hash guard script exists
-#   (3) auto-merge.yml runs the guard as a gating step
+#   (3) auto-merge.yaml runs the guard as a gating step
 #   (4) setup-rerere.sh pins rerere.autoupdate
 # Together these are the FORK-06/CI-03 enforcement: the tree-hash guard blocks
 # and labels any df-telemetry/-touching rebase, and autoupdate=off means a
@@ -29,11 +29,11 @@ else
   echo "OK: tree-hash guard script present"
 fi
 
-# (3) auto-merge.yml invokes the guard.
-if ! grep -q 'df-telemetry-treehash' .github/workflows/auto-merge.yml; then
-  echo "FAIL: auto-merge.yml does not invoke the df-telemetry/ tree-hash guard"; fail=1
+# (3) auto-merge.yaml invokes the guard.
+if ! grep -q 'df-telemetry-treehash' .github/workflows/auto-merge.yaml; then
+  echo "FAIL: auto-merge.yaml does not invoke the df-telemetry/ tree-hash guard"; fail=1
 else
-  echo "OK: auto-merge.yml gates on the df-telemetry/ tree-hash guard"
+  echo "OK: auto-merge.yaml gates on the df-telemetry/ tree-hash guard"
 fi
 
 # (4) setup-rerere.sh pins rerere.autoupdate.

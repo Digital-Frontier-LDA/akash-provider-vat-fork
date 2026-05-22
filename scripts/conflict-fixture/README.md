@@ -28,7 +28,7 @@ branches each run, and prints the two branch names on stdout.
 
 ## How the self-test consumes it
 
-`.github/workflows/rebase-guard-selftest.yml`:
+`.github/workflows/rebase-guard-selftest.yaml`:
 
 1. runs `make-fixture.sh` to build both branches;
 2. runs `scripts/df-telemetry-treehash.sh --compare main df-fixture/overlapping`
