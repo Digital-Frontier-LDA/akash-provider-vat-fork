@@ -1,5 +1,7 @@
 package dftelemetry
 
+import "encoding/json"
+
 // Event is the spec §0/§42 pre-enrichment subset the fork emits over the UDS.
 // Fork emits a SUBSET of spec §42 — never source_ip_hmac/geo_*/asn*/is_*/
 // confidence_* (those are sidecar fields, added downstream). The shape MUST
@@ -25,4 +27,15 @@ type Event struct {
 	ProviderUpstreamCommit  string  `json:"provider_upstream_commit"`
 	DFTelemetryCommit       string  `json:"df_telemetry_commit"`
 	CaptureSchemaVersion    string  `json:"capture_schema_version"`
+}
+
+// ToNDJSON marshals the event as a single line-delimited JSON object: one JSON
+// object followed by a '\n'. The Phase v1.0-03 sidecar reads the UDS stream
+// line-by-line, so the trailing newline is the record delimiter.
+func (e Event) ToNDJSON() ([]byte, error) {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
 }
