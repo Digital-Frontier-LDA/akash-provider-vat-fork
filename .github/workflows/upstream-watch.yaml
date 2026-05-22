@@ -25,14 +25,30 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch: {}
 
+# Least privilege: every write operation (branch push, PR creation) uses the
+# REBASE_PAT, so the default GITHUB_TOKEN needs no write scopes — keeping it
+# read-only limits blast radius if a step or action is ever compromised.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   detect-and-open-rebase-pr:
     runs-on: ubuntu-latest
     steps:
+      - name: Preflight — REBASE_PAT must be configured
+        # Fail fast with a clear message rather than letting checkout/git fail
+        # later with an opaque auth error when the secret is unset.
+        env:
+          REBASE_PAT: ${{ secrets.REBASE_PAT }}
+        run: |
+          if [ -z "${REBASE_PAT}" ]; then
+            echo "::error::REBASE_PAT secret is not set. upstream-watch needs a"
+            echo "::error::fine-grained PAT (Contents + Pull requests: read/write"
+            echo "::error::on this repo) stored as the REBASE_PAT repository secret."
+            exit 1
+          fi
+          echo "REBASE_PAT is configured."
+
       - name: Checkout fork (full history — a rebase needs it)
         uses: actions/checkout@v4
         with:
