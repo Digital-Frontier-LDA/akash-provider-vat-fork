@@ -14,7 +14,7 @@
 # REF SEMANTICS (the subtle part). The auto-merge guard compares the PRE-rebase
 # fork state against the POST-rebase fork state — NOT against the upstream base
 # tag. The upstream base (df-base/<tag>) never contains df-telemetry/, so a
-# compare against it would always report "changed". auto-merge.yml therefore
+# compare against it would always report "changed". auto-merge.yaml therefore
 # resolves:
 #   <a> = the PR's base branch (origin/main, the fork before the rebase)
 #   <b> = the PR head (the rebased branch)

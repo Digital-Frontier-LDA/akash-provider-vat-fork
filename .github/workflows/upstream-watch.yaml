@@ -3,11 +3,20 @@
 # Runs daily, compares the latest akash-network/provider release tag against the
 # UPSTREAM_TAG pin, and opens a rebase PR when a newer release exists. The fork
 # must stay tiny against upstream's ~3-week cadence (docs/fork-automation.md);
-# this workflow is the "fully automatable" half. The auto-merge.yml workflow
+# this workflow is the "fully automatable" half. The auto-merge.yaml workflow
 # decides whether the resulting PR may merge unattended.
 #
 # This workflow does NOT bump UPSTREAM_TAG — the rebase PR's own diff carries
 # the UPSTREAM_TAG bump, so the pin only advances when the PR actually merges.
+#
+# Auth: this workflow creates the branch + PR with a fine-grained PAT
+# (secret REBASE_PAT), not the default GITHUB_TOKEN. Two reasons:
+#  (1) the Digital-Frontier-LDA org disallows Actions creating PRs with
+#      GITHUB_TOKEN; (2) a PR opened by GITHUB_TOKEN does not trigger
+#      pull_request workflows (GitHub's recursion guard) — so ci.yaml and
+#      auto-merge.yaml would never run on the rebase PR. The PAT fixes both.
+# REBASE_PAT must be a fine-grained PAT scoped to this repo with
+# Contents: read/write + Pull requests: read/write.
 name: upstream-watch
 
 on:
@@ -16,22 +25,41 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch: {}
 
+# Least privilege: every write operation (branch push, PR creation) uses the
+# REBASE_PAT, so the default GITHUB_TOKEN needs no write scopes — keeping it
+# read-only limits blast radius if a step or action is ever compromised.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   detect-and-open-rebase-pr:
     runs-on: ubuntu-latest
     steps:
+      - name: Preflight — REBASE_PAT must be configured
+        # Fail fast with a clear message rather than letting checkout/git fail
+        # later with an opaque auth error when the secret is unset.
+        env:
+          REBASE_PAT: ${{ secrets.REBASE_PAT }}
+        run: |
+          if [ -z "${REBASE_PAT}" ]; then
+            echo "::error::REBASE_PAT secret is not set. upstream-watch needs a"
+            echo "::error::fine-grained PAT (Contents + Pull requests: read/write"
+            echo "::error::on this repo) stored as the REBASE_PAT repository secret."
+            exit 1
+          fi
+          echo "REBASE_PAT is configured."
+
       - name: Checkout fork (full history — a rebase needs it)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # PAT so the pushed branch + PR are attributed to the PAT identity —
+          # required for the rebase PR to trigger ci.yaml / auto-merge.yaml.
+          token: ${{ secrets.REBASE_PAT }}
 
       - name: Detect new upstream release and open a rebase PR
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.REBASE_PAT }}
         run: |
           set -euo pipefail
 
@@ -84,7 +112,7 @@ jobs:
           if [ "${REBASE_STATUS}" = "clean" ]; then
             BODY=$(printf '%s\n\n%s\n\n%s\n' \
               "Automated rebase onto upstream akash-network/provider \`${LATEST}\`." \
-              "The \`df-telemetry/\` tree-hash guard and \`ci.yml\` checks gate whether this merges unattended (see auto-merge.yml). This PR also bumps \`UPSTREAM_TAG\`." \
+              "The \`df-telemetry/\` tree-hash guard and \`ci.yaml\` checks gate whether this merges unattended (see auto-merge.yaml). This PR also bumps \`UPSTREAM_TAG\`." \
               "### Upstream release notes (${LATEST})
           ${NOTES}")
             gh pr create --base main --head "${BRANCH}" \
