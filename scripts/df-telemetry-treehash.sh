@@ -1,15 +1,40 @@
 #!/bin/sh
-# Prints the Git tree object SHA of df-telemetry/ at a given ref (default HEAD).
-# Git content-addresses every directory as a tree object; comparing tree SHAs
-# is exact and rename-aware. Plan 05's auto-merge.yml diffs the pre-rebase fork
-# state's df-telemetry tree SHA against the rebased HEAD's — any difference
-# means a human must review (FORK-05/FORK-06/CI-03).
+# df-telemetry/ tree-hash guard primitive.
 #
-# Note: at df-base/<tag> the df-telemetry/ directory does NOT exist (it was
-# added by the fork after the upstream base). The guard treats "tree missing
-# at one ref" as "changed -> human review". Plan 05 extends this script with
-# a --compare mode and compares the PRE-rebase fork branch against the
-# POST-rebase fork branch (both of which have df-telemetry/).
+# Usage:
+#   df-telemetry-treehash.sh <ref>             -> prints the df-telemetry/ tree SHA at <ref>
+#   df-telemetry-treehash.sh --compare <a> <b> -> exit 0 if the df-telemetry/ tree
+#                                                 SHA is equal at both refs, exit 1
+#                                                 if it differs
+#
+# Git content-addresses every directory as a tree object, so comparing
+# `git rev-parse <ref>:df-telemetry` between two refs is an exact, rename-aware
+# equality check (RESEARCH "Don't Hand-Roll": never diff file lists by hand).
+#
+# REF SEMANTICS (the subtle part). The auto-merge guard compares the PRE-rebase
+# fork state against the POST-rebase fork state — NOT against the upstream base
+# tag. The upstream base (df-base/<tag>) never contains df-telemetry/, so a
+# compare against it would always report "changed". auto-merge.yml therefore
+# resolves:
+#   <a> = the PR's base branch (origin/main, the fork before the rebase)
+#   <b> = the PR head (the rebased branch)
+# Both have df-telemetry/; a difference means the rebase modified our hook and a
+# human must review (FORK-05/FORK-06/CI-03).
 set -eu
-REF="${1:-HEAD}"
-git rev-parse "${REF}:df-telemetry"
+
+if [ "${1:-}" = "--compare" ]; then
+  if [ "$#" -lt 3 ]; then
+    echo "usage: df-telemetry-treehash.sh --compare <ref-a> <ref-b>" >&2
+    exit 2
+  fi
+  A=$(git rev-parse "${2}:df-telemetry" 2>/dev/null || echo "MISSING_A")
+  B=$(git rev-parse "${3}:df-telemetry" 2>/dev/null || echo "MISSING_B")
+  if [ "$A" = "$B" ] && [ "$A" != "MISSING_A" ]; then
+    echo "df-telemetry/ unchanged ($A) -> safe to auto-merge if CI green"
+    exit 0
+  fi
+  echo "df-telemetry/ CHANGED ($A != $B) -> HUMAN REVIEW REQUIRED"
+  exit 1
+fi
+
+git rev-parse "${1:-HEAD}:df-telemetry"
