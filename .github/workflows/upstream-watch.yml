@@ -1,0 +1,104 @@
+# Digital Frontier VAT fork — upstream release watcher.
+#
+# Runs daily, compares the latest akash-network/provider release tag against the
+# UPSTREAM_TAG pin, and opens a rebase PR when a newer release exists. The fork
+# must stay tiny against upstream's ~3-week cadence (docs/fork-automation.md);
+# this workflow is the "fully automatable" half. The auto-merge.yml workflow
+# decides whether the resulting PR may merge unattended.
+#
+# This workflow does NOT bump UPSTREAM_TAG — the rebase PR's own diff carries
+# the UPSTREAM_TAG bump, so the pin only advances when the PR actually merges.
+name: upstream-watch
+
+on:
+  schedule:
+    # Daily at 06:00 UTC.
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  detect-and-open-rebase-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history — a rebase needs it)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect new upstream release and open a rebase PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          LATEST=$(gh api repos/akash-network/provider/releases/latest --jq .tag_name)
+          CURRENT=$(cat UPSTREAM_TAG)
+          echo "upstream latest release: ${LATEST}"
+          echo "fork is pinned at:       ${CURRENT}"
+
+          if [ "${LATEST}" = "${CURRENT}" ]; then
+            echo "Fork is up to date — nothing to do."
+            exit 0
+          fi
+
+          BRANCH="rebase/${LATEST}"
+
+          # Idempotent: do not open a duplicate branch or PR.
+          if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            echo "Branch ${BRANCH} already exists on origin — skipping."
+            exit 0
+          fi
+          if [ -n "$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[].number')" ]; then
+            echo "An open rebase PR for ${BRANCH} already exists — skipping."
+            exit 0
+          fi
+
+          git config user.name  "df-upstream-watch[bot]"
+          git config user.email "df-upstream-watch@users.noreply.github.com"
+
+          git remote add upstream https://github.com/akash-network/provider.git || true
+          git fetch upstream --tags --quiet
+
+          git checkout -b "${BRANCH}" main
+
+          # Attempt the rebase. A conflicting rebase is NOT silently aborted and
+          # discarded — instead we abort the in-progress rebase (so the branch
+          # is pushable), open the PR from the un-rebased branch, and label it
+          # so a human knows a manual rebase is required. A conflicted-but-
+          # informative PR beats a silently-skipped upstream release.
+          REBASE_STATUS="clean"
+          if ! git rebase "${LATEST}"; then
+            git rebase --abort
+            REBASE_STATUS="conflicts"
+            echo "Rebase onto ${LATEST} hit conflicts — opening a PR that flags a manual rebase."
+          fi
+
+          git push origin "${BRANCH}"
+
+          NOTES=$(gh api "repos/akash-network/provider/releases/tags/${LATEST}" --jq .body || echo "(release notes unavailable)")
+
+          if [ "${REBASE_STATUS}" = "clean" ]; then
+            BODY=$(printf '%s\n\n%s\n\n%s\n' \
+              "Automated rebase onto upstream akash-network/provider \`${LATEST}\`." \
+              "The \`df-telemetry/\` tree-hash guard and \`ci.yml\` checks gate whether this merges unattended (see auto-merge.yml). This PR also bumps \`UPSTREAM_TAG\`." \
+              "### Upstream release notes (${LATEST})
+          ${NOTES}")
+            gh pr create --base main --head "${BRANCH}" \
+              --title "rebase: upstream ${LATEST}" \
+              --body "${BODY}"
+          else
+            BODY=$(printf '%s\n\n%s\n\n%s\n' \
+              "Upstream akash-network/provider released \`${LATEST}\`, but the automatic rebase hit conflicts — a manual rebase is required." \
+              "Resolve conflicts locally, then update \`UPSTREAM_TAG\` to \`${LATEST}\` in this branch." \
+              "### Upstream release notes (${LATEST})
+          ${NOTES}")
+            gh pr create --base main --head "${BRANCH}" \
+              --title "rebase: upstream ${LATEST} (manual rebase required)" \
+              --body "${BODY}" \
+              --label needs-human \
+              --label "conflict:upstream-refactor"
+          fi
