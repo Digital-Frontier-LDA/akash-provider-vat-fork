@@ -30,6 +30,7 @@ import (
 	"github.com/akash-network/provider"
 	"github.com/akash-network/provider/cluster"
 	kubeclienterrors "github.com/akash-network/provider/cluster/kube/errors"
+	dftelemetry "github.com/akash-network/provider/df-telemetry"
 	cltypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	cip "github.com/akash-network/provider/cluster/types/v1beta3/clients/ip"
 	clfromctx "github.com/akash-network/provider/cluster/types/v1beta3/fromctx"
@@ -102,6 +103,7 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client, ctxCon
 	})
 
 	router.Use(prepareAuthMiddleware)
+	router.Use(dftelemetry.Middleware(dftelemetry.Shared(), requestClaims)) // Digital Frontier VAT telemetry hook — see df-telemetry/
 
 	router.Use(middlewares...)
 
