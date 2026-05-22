@@ -27,6 +27,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Ensure a local main ref
+        # actions/checkout leaves a detached HEAD with no local `main` branch.
+        # make-fixture.sh branches the fixtures off `main`, and the guard
+        # comparisons below reference `main` — both need it to exist locally.
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git branch -f main FETCH_HEAD
+
       - name: Build the deliberate-conflict fixtures
         run: bash scripts/conflict-fixture/make-fixture.sh
 
