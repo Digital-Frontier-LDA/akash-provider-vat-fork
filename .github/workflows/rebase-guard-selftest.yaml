@@ -13,9 +13,12 @@
 name: rebase-guard-selftest
 
 on:
+  # PR-triggered: every PR re-runs this proof-of-correctness (the fixture +
+  # guard execution take seconds, no `paths` filter — cheap and exhaustive).
+  # protect-main blocks direct pushes to main, so a post-merge `push: [main]`
+  # re-run is redundant — and was brittle: `git fetch` auth failed on push
+  # events for this workflow. workflow_dispatch remains for ad-hoc verification.
   pull_request: {}
-  push:
-    branches: [main]
   workflow_dispatch: {}
 
 jobs:
