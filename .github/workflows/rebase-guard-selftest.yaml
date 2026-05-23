@@ -28,13 +28,20 @@ jobs:
           fetch-depth: 0
 
       - name: Ensure a local main ref
-        # actions/checkout leaves a detached HEAD with no local `main` branch.
-        # make-fixture.sh branches the fixtures off `main`, and the guard
-        # comparisons below reference `main` — both need it to exist locally.
+        # On pull_request, actions/checkout leaves a detached HEAD with no local
+        # `main` branch. make-fixture.sh branches the fixtures off `main` and
+        # the guard comparisons below reference `main`, so it must exist locally.
+        # On push-to-main events, `main` is already the checked-out branch —
+        # `git branch -f` would refuse to update the worktree branch, so skip
+        # the rebranch in that case (it's already at the right ref).
         run: |
           set -euo pipefail
           git fetch origin main
-          git branch -f main FETCH_HEAD
+          if [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != "main" ]; then
+            git branch -f main FETCH_HEAD
+          else
+            echo "Already on main — skipping rebranch (fetch updated origin/main)."
+          fi
 
       - name: Build the deliberate-conflict fixtures
         run: bash scripts/conflict-fixture/make-fixture.sh
