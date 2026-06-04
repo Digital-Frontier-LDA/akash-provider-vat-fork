@@ -1,0 +1,44 @@
+name: df-build-image
+
+# One-off: build the forked provider image (with the df-telemetry hook) for amd64
+# on a GitHub-hosted runner and push to GHCR. The canonical `release` workflow needs a
+# self-hosted `core-e2e` runner + a tag; this reuses the fork's own `make docker-image`
+# (goreleaser snapshot, handles wasmvm/musl/CGO) so no self-hosted runner is required.
+on:
+  push:
+    branches: [df-build-image]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_DOCKER_IMAGE: ghcr.io/digital-frontier-lda/akash-provider-vat-fork
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Show toolchain
+        run: |
+          go version
+          make -s -p 2>/dev/null | grep -E '^(GOTOOLCHAIN|GOTOOLCHAIN_SEMVER|RELEASE_DOCKER_IMAGE|GORELEASER_IMAGE) ' || true
+      - name: Build provider image (snapshot)
+        run: make docker-image RELEASE_DOCKER_IMAGE=ghcr.io/digital-frontier-lda/akash-provider-vat-fork
+      - name: Push amd64 image
+        run: |
+          docker images
+          docker push ghcr.io/digital-frontier-lda/akash-provider-vat-fork:latest-amd64
