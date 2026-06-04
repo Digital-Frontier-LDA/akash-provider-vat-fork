@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	proxyproto "github.com/pires/go-proxyproto"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -792,8 +793,17 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	})
 
 	group.Go(func() error {
-		// certificates are supplied via tls.Config
-		return gwRest.ListenAndServeTLS("", "")
+		// certificates are supplied via tls.Config.
+		// df-telemetry (DEC-06): wrap the listener with PROXY-protocol parsing so the real
+		// client IP forwarded by the IP-preserving proxy DaemonSet becomes RemoteAddr (the
+		// resolver's source_ip_policy mode=proxy_protocol reads RemoteAddr). go-proxyproto is
+		// OPTIONAL by default — a connection without a PROXY header is served unchanged, so the
+		// provider stays fail-safe whether or not the proxy is in front (Guardrail #9).
+		ln, lerr := net.Listen("tcp", gwRest.Addr)
+		if lerr != nil {
+			return lerr
+		}
+		return gwRest.ServeTLS(&proxyproto.Listener{Listener: ln}, "", "")
 	})
 
 	group.Go(func() error {
