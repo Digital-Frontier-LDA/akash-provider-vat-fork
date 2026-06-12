@@ -67,6 +67,14 @@ jobs:
       - name: Detect new upstream release and open a rebase PR
         env:
           GH_TOKEN: ${{ secrets.REBASE_PAT }}
+          # This repo is a GitHub FORK of akash-network/provider. Without this,
+          # `gh pr create` / `gh pr list` default the base to the PARENT repo
+          # (akash-network/provider), so PR creation fails with "Resource not
+          # accessible by personal access token (createPullRequest)" — the PAT has
+          # no access to upstream. Pin gh to THIS repo so the rebase PR is opened
+          # within the fork (base = this repo's main). `gh api` calls with explicit
+          # paths (repos/akash-network/provider/...) are unaffected.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
