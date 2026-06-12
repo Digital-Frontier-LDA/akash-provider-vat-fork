@@ -16,7 +16,14 @@
 #      pull_request workflows (GitHub's recursion guard) — so ci.yaml and
 #      auto-merge.yaml would never run on the rebase PR. The PAT fixes both.
 # REBASE_PAT must be a fine-grained PAT scoped to this repo with
-# Contents: read/write + Pull requests: read/write.
+# Contents: read/write + Pull requests: read/write + Workflows: read/write.
+# Workflows is REQUIRED, not optional: rebasing onto a new upstream release
+# carries upstream's own .github/workflows/* changes, and GitHub refuses to let a
+# token without the Workflows permission push workflow-file edits — the rebase
+# branch push fails with "refusing to allow a Personal Access Token to create or
+# update workflow `.github/workflows/...` without `workflow` scope" and the run
+# dies before opening the PR. (Hit on the v0.12.0 -> v0.14.0 rebase 2026-06-12,
+# which had to be completed manually with a workflow-scoped token.)
 name: upstream-watch
 
 on:
