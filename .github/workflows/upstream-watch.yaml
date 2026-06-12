@@ -120,6 +120,17 @@ jobs:
             echo "Rebase onto ${LATEST} hit conflicts — opening a PR that flags a manual rebase."
           fi
 
+          # On a clean rebase, advance the pin in the branch so the PR's diff
+          # actually carries the UPSTREAM_TAG bump (the clean-case PR body claims
+          # it does). Without this the merged PR leaves UPSTREAM_TAG stale and the
+          # next run re-rebases the SAME release forever. The conflicts case is
+          # deliberately left for a human (they bump UPSTREAM_TAG while resolving).
+          if [ "${REBASE_STATUS}" = "clean" ] && [ "$(cat UPSTREAM_TAG)" != "${LATEST}" ]; then
+            printf '%s\n' "${LATEST}" > UPSTREAM_TAG
+            git add UPSTREAM_TAG
+            git commit -m "chore: bump UPSTREAM_TAG to ${LATEST}"
+          fi
+
           git push origin "${BRANCH}"
 
           NOTES=$(gh api "repos/akash-network/provider/releases/tags/${LATEST}" --jq .body || echo "(release notes unavailable)")
