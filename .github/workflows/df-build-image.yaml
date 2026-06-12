@@ -21,6 +21,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Free ~25-30GB on the hosted runner. The goreleaser-cross build compiles
+      # multiple targets (linux amd64+arm64 + debug variants) and v0.14.0's larger
+      # dependency tree overflows the default ~14GB disk ("no space left on device"
+      # in /tmp/go-build). Remove preinstalled SDKs we don't use before building.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
+            /usr/local/lib/node_modules /usr/share/swift || true
+          sudo docker image prune -af || true
+          df -h /
       # Canonical fork setup: installs direnv + loads .envrc (AKASH_DIRENV_SET) + Go.
       - uses: ./.github/actions/setup-ubuntu
       - uses: docker/setup-qemu-action@v3
