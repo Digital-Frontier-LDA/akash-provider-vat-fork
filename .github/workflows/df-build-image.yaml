@@ -8,6 +8,15 @@ on:
   push:
     branches: [df-build-image]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: >-
+          Version stamped into version.Version (e.g. v0.14.2-df.1). Without it,
+          Make falls back to `git describe --tags --abbrev=0`, which resolves the
+          df-base/* ref through upstream's embedded tag name and emits the long
+          v0.14.0-21-g<full-sha> form that Akash Console then displays verbatim.
+        required: true
+        type: string
 
 jobs:
   build:
@@ -43,8 +52,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build provider image (snapshot)
-        run: make docker-image RELEASE_DOCKER_IMAGE=ghcr.io/digital-frontier-lda/akash-provider-vat-fork
+        run: >-
+          make docker-image
+          RELEASE_DOCKER_IMAGE=ghcr.io/digital-frontier-lda/akash-provider-vat-fork
+          ${{ inputs.release_tag && format('RELEASE_TAG={0}', inputs.release_tag) || '' }}
       - name: Push amd64 image
         run: |
           docker images
           docker push ghcr.io/digital-frontier-lda/akash-provider-vat-fork:latest-amd64
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            docker tag ghcr.io/digital-frontier-lda/akash-provider-vat-fork:latest-amd64 \
+              ghcr.io/digital-frontier-lda/akash-provider-vat-fork:${{ inputs.release_tag }}-amd64
+            docker push ghcr.io/digital-frontier-lda/akash-provider-vat-fork:${{ inputs.release_tag }}-amd64
+          fi
+          echo "== pushed digest (pin this in helm values) =="
+          docker inspect --format='{{index .RepoDigests 0}}' \
+            ghcr.io/digital-frontier-lda/akash-provider-vat-fork:latest-amd64
