@@ -52,18 +52,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build provider image (snapshot)
-        run: >-
-          make docker-image
-          RELEASE_DOCKER_IMAGE=ghcr.io/digital-frontier-lda/akash-provider-vat-fork
-          ${{ inputs.release_tag && format('RELEASE_TAG={0}', inputs.release_tag) || '' }}
+        # release_tag reaches the shell via env, not ${{ }} interpolation in run:
+        # (zizmor/CodeRabbit template-injection rule — a crafted input could
+        # otherwise inject shell into the runner).
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          make docker-image \
+            RELEASE_DOCKER_IMAGE=ghcr.io/digital-frontier-lda/akash-provider-vat-fork \
+            ${RELEASE_TAG_INPUT:+RELEASE_TAG="$RELEASE_TAG_INPUT"}
       - name: Push amd64 image
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
         run: |
           docker images
           docker push ghcr.io/digital-frontier-lda/akash-provider-vat-fork:latest-amd64
-          if [ -n "${{ inputs.release_tag }}" ]; then
+          if [ -n "$RELEASE_TAG_INPUT" ]; then
             docker tag ghcr.io/digital-frontier-lda/akash-provider-vat-fork:latest-amd64 \
-              ghcr.io/digital-frontier-lda/akash-provider-vat-fork:${{ inputs.release_tag }}-amd64
-            docker push ghcr.io/digital-frontier-lda/akash-provider-vat-fork:${{ inputs.release_tag }}-amd64
+              "ghcr.io/digital-frontier-lda/akash-provider-vat-fork:${RELEASE_TAG_INPUT}-amd64"
+            docker push "ghcr.io/digital-frontier-lda/akash-provider-vat-fork:${RELEASE_TAG_INPUT}-amd64"
           fi
           echo "== pushed digest (pin this in helm values) =="
           docker inspect --format='{{index .RepoDigests 0}}' \
