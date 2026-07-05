@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	proxyproto "github.com/pires/go-proxyproto"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -93,6 +94,7 @@ const (
 	FlagAuthPem                          = "auth-pem"
 	FlagDeploymentRuntimeClass           = "deployment-runtime-class"
 	FlagBidTimeout                       = "bid-timeout"
+	FlagReclamationWindow                = "reclamation-window"
 	FlagManifestTimeout                  = "manifest-timeout"
 	FlagMetricsListener                  = "metrics-listener"
 	FlagWithdrawalPeriod                 = "withdrawal-period"
@@ -196,6 +198,7 @@ func RunCmd() *cobra.Command {
 
 			leaseFundsMonInterval := viper.GetDuration(FlagLeaseFundsMonitorInterval)
 			withdrawPeriod := viper.GetDuration(FlagWithdrawalPeriod)
+			reclamationWindow := viper.GetDuration(FlagReclamationWindow)
 
 			if leaseFundsMonInterval < time.Minute || leaseFundsMonInterval > 24*time.Hour {
 				return fmt.Errorf(`flag "%s" contains invalid value. expected >=1m<=24h`, FlagLeaseFundsMonitorInterval) // nolint: err113
@@ -203,6 +206,10 @@ func RunCmd() *cobra.Command {
 
 			if withdrawPeriod > 0 && withdrawPeriod < leaseFundsMonInterval {
 				return fmt.Errorf(`flag "%s" value must be > "%s"`, FlagWithdrawalPeriod, FlagLeaseFundsMonitorInterval) // nolint: err113
+			}
+
+			if reclamationWindow < 0 {
+				return fmt.Errorf(`flag "%s" value must be >= 0`, FlagReclamationWindow) // nolint: err113
 			}
 
 			if viper.GetDuration(FlagMonitorRetryPeriod) < 4*time.Second {
@@ -480,6 +487,7 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	blockedHostnames := viper.GetStringSlice(FlagDeploymentBlockedHostnames)
 	deploymentRuntimeClass := viper.GetString(FlagDeploymentRuntimeClass)
 	bidTimeout := viper.GetDuration(FlagBidTimeout)
+	reclamationWindow := viper.GetDuration(FlagReclamationWindow)
 	manifestTimeout := viper.GetDuration(FlagManifestTimeout)
 	metricsListener := viper.GetString(FlagMetricsListener)
 	providerConfig := viper.GetString(FlagProviderConfig)
@@ -655,6 +663,10 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	config.DeploymentIngressDomain = deploymentIngressDomain
 	config.BidTimeout = bidTimeout
 	config.ManifestTimeout = manifestTimeout
+
+	if reclamationWindow > 0 {
+		config.ReclamationWindow = &reclamationWindow
+	}
 	config.MonitorMaxRetries = monitorMaxRetries
 	config.MonitorRetryPeriod = monitorRetryPeriod
 	config.MonitorRetryPeriodJitter = monitorRetryPeriodJitter
@@ -792,8 +804,17 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	})
 
 	group.Go(func() error {
-		// certificates are supplied via tls.Config
-		return gwRest.ListenAndServeTLS("", "")
+		// certificates are supplied via tls.Config.
+		// df-telemetry (DEC-06): wrap the listener with PROXY-protocol parsing so the real
+		// client IP forwarded by the IP-preserving proxy DaemonSet becomes RemoteAddr (the
+		// resolver's source_ip_policy mode=proxy_protocol reads RemoteAddr). go-proxyproto is
+		// OPTIONAL by default — a connection without a PROXY header is served unchanged, so the
+		// provider stays fail-safe whether or not the proxy is in front (Guardrail #9).
+		ln, lerr := net.Listen("tcp", gwRest.Addr)
+		if lerr != nil {
+			return lerr
+		}
+		return gwRest.ServeTLS(&proxyproto.Listener{Listener: ln}, "", "")
 	})
 
 	group.Go(func() error {
