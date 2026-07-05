@@ -67,6 +67,14 @@ jobs:
       - name: Detect new upstream release and open a rebase PR
         env:
           GH_TOKEN: ${{ secrets.REBASE_PAT }}
+          # This repo is a GitHub FORK of akash-network/provider. Without this,
+          # `gh pr create` / `gh pr list` default the base to the PARENT repo
+          # (akash-network/provider), so PR creation fails with "Resource not
+          # accessible by personal access token (createPullRequest)" — the PAT has
+          # no access to upstream. Pin gh to THIS repo so the rebase PR is opened
+          # within the fork (base = this repo's main). `gh api` calls with explicit
+          # paths (repos/akash-network/provider/...) are unaffected.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -110,6 +118,17 @@ jobs:
             git rebase --abort
             REBASE_STATUS="conflicts"
             echo "Rebase onto ${LATEST} hit conflicts — opening a PR that flags a manual rebase."
+          fi
+
+          # On a clean rebase, advance the pin in the branch so the PR's diff
+          # actually carries the UPSTREAM_TAG bump (the clean-case PR body claims
+          # it does). Without this the merged PR leaves UPSTREAM_TAG stale and the
+          # next run re-rebases the SAME release forever. The conflicts case is
+          # deliberately left for a human (they bump UPSTREAM_TAG while resolving).
+          if [ "${REBASE_STATUS}" = "clean" ] && [ "$(cat UPSTREAM_TAG)" != "${LATEST}" ]; then
+            printf '%s\n' "${LATEST}" > UPSTREAM_TAG
+            git add UPSTREAM_TAG
+            git commit -m "chore: bump UPSTREAM_TAG to ${LATEST}"
           fi
 
           git push origin "${BRANCH}"
