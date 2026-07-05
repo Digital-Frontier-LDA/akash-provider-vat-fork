@@ -181,6 +181,11 @@ func addRunFlags(cmd *cobra.Command) error {
 		return err
 	}
 
+	cmd.Flags().Duration(FlagReclamationWindow, 0, "reclamation window duration to offer in bids (e.g. 24h, 720h). 0 means no reclamation offered")
+	if err := viper.BindPFlag(FlagReclamationWindow, cmd.Flags().Lookup(FlagReclamationWindow)); err != nil {
+		return err
+	}
+
 	cmd.Flags().Duration(FlagManifestTimeout, 5*time.Minute, "time after which bids are cancelled if no manifest is received")
 	if err := viper.BindPFlag(FlagManifestTimeout, cmd.Flags().Lookup(FlagManifestTimeout)); err != nil {
 		return err
@@ -351,6 +356,11 @@ func addRunFlags(cmd *cobra.Command) error {
 
 	cmd.Flags().String(FlagGatewayProvider, "nginx", "Gateway provider: 'nginx' for NGINX Gateway Fabric (default)")
 	if err := viper.BindPFlag(FlagGatewayProvider, cmd.Flags().Lookup(FlagGatewayProvider)); err != nil {
+		return err
+	}
+
+	cmd.Flags().String(providerflags.FlagProxyBufferSize, "16k", "NGINX proxy buffer size for upstream response headers")
+	if err := viper.BindPFlag(providerflags.FlagProxyBufferSize, cmd.Flags().Lookup(providerflags.FlagProxyBufferSize)); err != nil {
 		return err
 	}
 

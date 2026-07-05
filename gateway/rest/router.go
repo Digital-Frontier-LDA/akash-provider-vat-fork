@@ -21,6 +21,7 @@ import (
 	"cosmossdk.io/log"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
+	inventoryV1 "pkg.akt.dev/go/inventory/v1"
 	manifest "pkg.akt.dev/go/manifest/v2beta3"
 	mtypes "pkg.akt.dev/go/node/market/v1"
 	apclient "pkg.akt.dev/go/provider/client"
@@ -441,13 +442,25 @@ func createStatusHandler(log log.Logger, sclient provider.StatusClient, provider
 			http.Error(w, err.Error(), httperror.StatusCodeFrom(err))
 			return
 		}
+		leasedIP := inventoryV1.ResourcePair{}
+		statusV1, statusV1Err := sclient.StatusV1(req.Context())
+		if statusV1Err != nil {
+			log.Error("failed to fetch v1 status; leased_ip will be omitted", "err", statusV1Err)
+		}
+		if statusV1 != nil && statusV1.Cluster != nil {
+			inventory := statusV1.Cluster.GetInventory()
+			leasedIP = inventory.GetLeasedIP()
+		}
+
 		data := struct {
 			// provider.Status
 			apclient.ProviderStatus
-			Address string `json:"address"`
+			Address  string                   `json:"address"`
+			LeasedIP inventoryV1.ResourcePair `json:"leased_ip"`
 		}{
 			ProviderStatus: *status,
 			Address:        providerAddr.String(),
+			LeasedIP:       leasedIP,
 		}
 		writeJSON(log, w, data)
 	}
@@ -694,10 +707,10 @@ func wsLogWriter(ctx context.Context, ws *websocket.Conn, cfg wsStreamConfig) {
 
 	logs, err := cfg.client.LeaseLogs(cctx, cfg.lid, cfg.services, cfg.follow, cfg.tailLines)
 	if err != nil {
-		cfg.log.Error("couldn't fetch logs", "error", err.Error())
+		cfg.log.Error("couldn't fetch logs", "err", err.Error())
 		err = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocketCloseCodeFrom(err), ""))
 		if err != nil {
-			cfg.log.Error("couldn't push control message through websocket", "error", err.Error())
+			cfg.log.Error("couldn't push control message through websocket", "err", err.Error())
 		}
 		return
 	}
@@ -788,10 +801,10 @@ func wsEventWriter(ctx context.Context, ws *websocket.Conn, cfg wsStreamConfig) 
 
 	evts, err := cfg.client.LeaseEvents(cctx, cfg.lid, cfg.services, cfg.follow)
 	if err != nil {
-		cfg.log.Error("couldn't fetch events", "error", err.Error())
+		cfg.log.Error("couldn't fetch events", "err", err.Error())
 		err = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocketCloseCodeFrom(err), ""))
 		if err != nil {
-			cfg.log.Error("couldn't push control message through websocket", "error", err.Error())
+			cfg.log.Error("couldn't push control message through websocket", "err", err.Error())
 		}
 		return
 	}
@@ -801,7 +814,7 @@ func wsEventWriter(ctx context.Context, ws *websocket.Conn, cfg wsStreamConfig) 
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocketLeaseNotFound, ""))
 		if err != nil {
-			cfg.log.Error("couldn't push control message through websocket", "error", err.Error())
+			cfg.log.Error("couldn't push control message through websocket", "err", err.Error())
 		}
 		return
 	}

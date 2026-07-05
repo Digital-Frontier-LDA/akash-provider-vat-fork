@@ -1,0 +1,77 @@
+name: df-build-image
+
+# One-off: build the forked provider image (with the df-telemetry hook) for amd64
+# on a GitHub-hosted runner and push to GHCR. The canonical `release` workflow needs a
+# self-hosted `core-e2e` runner + a tag; this reuses the fork's own `make docker-image`
+# (goreleaser snapshot, handles wasmvm/musl/CGO) so no self-hosted runner is required.
+on:
+  push:
+    branches: [df-build-image]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: >-
+          Version stamped into version.Version (e.g. v0.14.2-df.1). Without it,
+          Make falls back to `git describe --tags --abbrev=0`, which resolves the
+          df-base/* ref through upstream's embedded tag name and emits the long
+          v0.14.0-21-g<full-sha> form that Akash Console then displays verbatim.
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_DOCKER_IMAGE: ghcr.io/digital-frontier-lda/akash-provider-vat-fork
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Free ~25-30GB on the hosted runner. The goreleaser-cross build compiles
+      # multiple targets (linux amd64+arm64 + debug variants) and v0.14.0's larger
+      # dependency tree overflows the default ~14GB disk ("no space left on device"
+      # in /tmp/go-build). Remove preinstalled SDKs we don't use before building.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
+            /usr/local/lib/node_modules /usr/share/swift || true
+          sudo docker image prune -af || true
+          df -h /
+      # Canonical fork setup: installs direnv + loads .envrc (AKASH_DIRENV_SET) + Go.
+      - uses: ./.github/actions/setup-ubuntu
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build provider image (snapshot)
+        # release_tag reaches the shell via env, not ${{ }} interpolation in run:
+        # (zizmor/CodeRabbit template-injection rule — a crafted input could
+        # otherwise inject shell into the runner).
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          make docker-image \
+            RELEASE_DOCKER_IMAGE=ghcr.io/digital-frontier-lda/akash-provider-vat-fork \
+            ${RELEASE_TAG_INPUT:+RELEASE_TAG="$RELEASE_TAG_INPUT"}
+      - name: Push amd64 image
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          docker images
+          docker push ghcr.io/digital-frontier-lda/akash-provider-vat-fork:latest-amd64
+          if [ -n "$RELEASE_TAG_INPUT" ]; then
+            docker tag ghcr.io/digital-frontier-lda/akash-provider-vat-fork:latest-amd64 \
+              "ghcr.io/digital-frontier-lda/akash-provider-vat-fork:${RELEASE_TAG_INPUT}-amd64"
+            docker push "ghcr.io/digital-frontier-lda/akash-provider-vat-fork:${RELEASE_TAG_INPUT}-amd64"
+          fi
+          echo "== pushed digest (pin this in helm values) =="
+          docker inspect --format='{{index .RepoDigests 0}}' \
+            ghcr.io/digital-frontier-lda/akash-provider-vat-fork:latest-amd64
