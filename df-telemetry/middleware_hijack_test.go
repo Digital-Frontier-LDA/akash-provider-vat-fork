@@ -14,8 +14,9 @@ import (
 // upgrade (gorilla/websocket via http.ResponseController, which resolves
 // Hijacker through Unwrap chains). A middleware wrapper that hides Hijacker
 // makes every upgrade fail with a 500 before the handler runs — the exact
-// fleet-wide lease-shell/lease-logs outage of 2026-07. This test dials a real
-// WebSocket through the middleware so that regression cannot ship again.
+// fleet-wide lease-shell/lease-logs outage of 2026-07 (REL-01 violation).
+// This test dials a real WebSocket through the middleware so that regression
+// cannot ship again.
 func TestMiddlewareAllowsWebsocketHijack(t *testing.T) {
 	c := newCaptureEmitter(t)
 
@@ -41,6 +42,7 @@ func TestMiddlewareAllowsWebsocketHijack(t *testing.T) {
 		status := 0
 		if resp != nil {
 			status = resp.StatusCode
+			_ = resp.Body.Close()
 		}
 		t.Fatalf("websocket upgrade through telemetry middleware failed (HTTP %d): %v", status, err)
 	}
