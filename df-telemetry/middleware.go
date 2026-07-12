@@ -203,6 +203,14 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// Unwrap lets http.ResponseController reach Hijacker/Flusher on the wrapped
+// writer. The shell/logs endpoints hijack the connection for the WebSocket
+// upgrade; a wrapper that hides Hijacker turns every streaming endpoint into
+// a 500 (fleet-wide lease-shell/lease-logs outage, 2026-07 — CLAUDE.md
+// guardrail #3: telemetry must never break a provider request). After a
+// hijack the captured status stays 200; the wire status is out of our sight.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func parseUint32(s string) (uint32, bool) {
 	if s == "" {
 		return 0, false
