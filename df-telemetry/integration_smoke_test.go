@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
 
 // TestSmoke_EndToEndControlPlaneRequests is the df-telemetry integration smoke
@@ -47,8 +49,13 @@ func TestSmoke_EndToEndControlPlaneRequests(t *testing.T) {
 	router := mux.NewRouter()
 	router.Use(Middleware(cap.em, nil))
 	router.HandleFunc("/deployment/{dseq}/manifest", okHF).Methods(http.MethodPut)
-	router.HandleFunc("/lease/{dseq}/{gseq}/{oseq}/shell", okHF)
-	router.HandleFunc("/lease/{dseq}/{gseq}/{oseq}/logs", okHF).Methods(http.MethodGet)
+	// shell/logs are WebSocket endpoints in production (leaseShellHandler /
+	// leaseLogsHandler hijack the connection to upgrade). The smoke harness
+	// used to register them as plain-HTTP stubs, which is exactly how the
+	// 2026-07 fleet-wide shell/logs 500 (statusWriter hiding http.Hijacker)
+	// sailed through CI — so these two routes now do a REAL upgrade.
+	router.HandleFunc("/lease/{dseq}/{gseq}/{oseq}/shell", wsEchoHF)
+	router.HandleFunc("/lease/{dseq}/{gseq}/{oseq}/logs", wsEchoHF).Methods(http.MethodGet)
 	router.HandleFunc("/lease/{dseq}/{gseq}/{oseq}/status", okHF).Methods(http.MethodGet)
 
 	// A real HTTP server — synthetic control-plane requests travel over a real
@@ -60,7 +67,6 @@ func TestSmoke_EndToEndControlPlaneRequests(t *testing.T) {
 		method, path, wantType string
 	}{
 		{http.MethodPut, "/deployment/100/manifest", eventManifestSubmit},
-		{http.MethodGet, "/lease/100/1/1/shell", eventLeaseShellConnection},
 		{http.MethodGet, "/lease/100/1/1/status", eventLeaseStatusCheck},
 	}
 	for _, rq := range requests {
@@ -76,8 +82,38 @@ func TestSmoke_EndToEndControlPlaneRequests(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 
+	// shell + logs: REAL WebSocket upgrades through the middleware, like
+	// production. The upgrade must reach 101 (Hijacker resolvable through the
+	// statusWriter wrapper) and the echo frame must come back.
+	wsDials := []struct {
+		path, wantType string
+	}{
+		{"/lease/100/1/1/shell", eventLeaseShellConnection},
+		{"/lease/100/1/1/logs", eventLeaseLogsConnection},
+	}
+	for _, d := range wsDials {
+		wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + d.path
+		ws, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			status := 0
+			if resp != nil {
+				status = resp.StatusCode
+				_ = resp.Body.Close()
+			}
+			t.Fatalf("websocket upgrade %s failed (HTTP %d): %v", d.path, status, err)
+		}
+		_, msg, err := ws.ReadMessage()
+		if err != nil {
+			t.Fatalf("read echo frame on %s: %v", d.path, err)
+		}
+		if string(msg) != "ok" {
+			t.Fatalf("echo frame on %s = %q, want %q", d.path, msg, "ok")
+		}
+		_ = ws.Close()
+	}
+
 	// Each request emits exactly two events: pre_auth then verified-flow.
-	events := cap.readEvents(t, len(requests)*2)
+	events := cap.readEvents(t, (len(requests)+len(wsDials))*2)
 
 	for i, rq := range requests {
 		pre := events[i*2]
@@ -106,6 +142,24 @@ func TestSmoke_EndToEndControlPlaneRequests(t *testing.T) {
 		assertSpec0FieldsPopulated(t, i*2+1, verified, providerID)
 	}
 
+	for j, d := range wsDials {
+		base := (len(requests) + j) * 2
+		pre, verified := events[base], events[base+1]
+		if pre.AuthState != authPreAuth {
+			t.Errorf("ws dial %s: event %d auth_state = %q, want pre_auth", d.path, base, pre.AuthState)
+		}
+		if verified.AuthState == authPreAuth {
+			t.Errorf("ws dial %s: event %d auth_state = pre_auth, want a resolved state", d.path, base+1)
+		}
+		for _, ev := range []Event{pre, verified} {
+			if ev.EventType != d.wantType {
+				t.Errorf("ws dial %s: event_type = %q, want %q", d.path, ev.EventType, d.wantType)
+			}
+		}
+		assertSpec0FieldsPopulated(t, base, pre, providerID)
+		assertSpec0FieldsPopulated(t, base+1, verified, providerID)
+	}
+
 	// At least one pre_auth and one resolved line — the two-event-flow proof.
 	var preCount, resolvedCount int
 	for _, ev := range events {
@@ -119,8 +173,8 @@ func TestSmoke_EndToEndControlPlaneRequests(t *testing.T) {
 		t.Fatalf("two-event-flow proof failed: pre_auth=%d resolved=%d", preCount, resolvedCount)
 	}
 
-	t.Logf("smoke OK: %d control-plane requests -> %d NDJSON events (pre_auth=%d resolved=%d), provider_id=%q",
-		len(requests), len(events), preCount, resolvedCount, providerID)
+	t.Logf("smoke OK: %d plain + %d websocket control-plane requests -> %d NDJSON events (pre_auth=%d resolved=%d), provider_id=%q",
+		len(requests), len(wsDials), len(events), preCount, resolvedCount, providerID)
 }
 
 // assertSpec0FieldsPopulated checks every spec §0/§42-subset field that must be
@@ -160,4 +214,18 @@ func smokeEnvOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// wsEchoHF upgrades to a WebSocket and writes one "ok" frame — the minimal
+// stand-in for leaseShellHandler/leaseLogsHandler, which hijack the connection
+// the same way via gorilla/websocket.
+func wsEchoHF(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{}
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		// Upgrade already wrote its own error response.
+		return
+	}
+	defer func() { _ = ws.Close() }()
+	_ = ws.WriteMessage(websocket.TextMessage, []byte("ok"))
 }
