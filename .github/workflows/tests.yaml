@@ -23,13 +23,13 @@ jobs:
           sudo rm -rf ./* || true
           sudo rm -rf ./.??* || true
           sudo rm -rf $HOME/go/pkg/mod || true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - run: make build
       - run: make provider-services
       - run: make docker-image
@@ -37,7 +37,7 @@ jobs:
   tests:
     runs-on: [self-hosted, akash]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
       - run: make test-full
@@ -45,7 +45,7 @@ jobs:
   lint:
     runs-on: [self-hosted, akash]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
       - name: Run linter
@@ -60,14 +60,14 @@ jobs:
         run: |
           sudo rm -rf ./* || true
           sudo rm -rf ./.??* || true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - uses: fregante/setup-git-user@v2
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: fregante/setup-git-user@024bc0b8e177d7e77203b48dab6fb45666854b35 # v2
       - name: configure git tag
         run: echo "RELEASE_TAG=v$(./script/semver.sh bump patch $(git describe --tags --abbrev=0))" >> $GITHUB_ENV
       - name: git tag
@@ -78,11 +78,11 @@ jobs:
   coverage:
     runs-on: [self-hosted, akash]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
@@ -91,7 +91,7 @@ jobs:
   yamlcheck:
     runs-on: [self-hosted, akash]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: check-yml-count
         run: |
           if [[ $(git ls-files '*.yml' ':!:.codecov.yml' | wc -l) -ne 0 ]]; then git ls-files '*.yml' ':!:.codecov.yml' && exit 1;fi
@@ -99,7 +99,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
       - run: make shellcheck
@@ -120,10 +120,10 @@ jobs:
       - shellcheck
       - integration-tests
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: trigger release process
-        uses: benc-uk/workflow-dispatch@v1
+        uses: benc-uk/workflow-dispatch@31e2b3319479a63f0ab15bf800eff9e913504e26 # v1
         with:
           workflow: release.yaml
