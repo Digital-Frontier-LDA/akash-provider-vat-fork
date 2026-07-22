@@ -57,7 +57,7 @@ jobs:
           echo "REBASE_PAT is configured."
 
       - name: Checkout fork (full history — a rebase needs it)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           # PAT so the pushed branch + PR are attributed to the PAT identity —
