@@ -156,9 +156,14 @@ jobs:
           # `${CURRENT}..main` restricted to our own files, which is small (~42
           # files, 2 of them upstream-tracked), and a 3-way apply onto
           # ${LATEST} is the operation a rebase was only ever approximating.
-          # Pin the fork tip by SHA before switching branches, so the delta's
-          # endpoint cannot depend on which ref names survive the checkout.
-          FORK_HEAD=$(git rev-parse HEAD)
+          # Anchor the delta's endpoint to origin/main by SHA. NOT `HEAD`: on
+          # workflow_dispatch actions/checkout checks out whatever ref was
+          # dispatched, so HEAD can be some feature branch and the PR would
+          # carry that branch's delta while claiming to be a main rebase. The
+          # PR's base is main, so main is the only correct endpoint.
+          git fetch origin main --quiet
+          FORK_HEAD=$(git rev-parse origin/main)
+          echo "fork delta endpoint: origin/main = ${FORK_HEAD}"
           git checkout -b "${BRANCH}" "${LATEST}"
 
           REBASE_STATUS="clean"
@@ -204,13 +209,18 @@ jobs:
               "Resolve conflicts locally, then update \`UPSTREAM_TAG\` to \`${LATEST}\` in this branch." \
               "### Upstream release notes (${LATEST})
           ${NOTES}")
-            gh pr create --base main --head "${BRANCH}" \
+            # Capture the URL gh prints, and edit by URL rather than by branch
+            # name: branch-name resolution is ambiguous in a fork, and the
+            # `|| true` below would swallow the miss, leaving an unlabelled
+            # conflict PR that looks like a clean one.
+            PR_URL=$(gh pr create --base main --head "${BRANCH}" \
               --title "rebase: upstream ${LATEST} (manual rebase required)" \
-              --body "${BODY}"
+              --body "${BODY}")
+            echo "opened ${PR_URL}"
             # Labels are applied AFTER the PR exists and never fail the run.
             # Doing it inline via `gh pr create --label` is what lost three
             # upstream releases: the label did not exist, the whole command
             # exited 1, and no PR was created even though the branch was pushed.
-            gh pr edit "${BRANCH}" --add-label needs-human \
+            gh pr edit "${PR_URL}" --add-label needs-human \
               --add-label "conflict:upstream-refactor" || true
           fi
