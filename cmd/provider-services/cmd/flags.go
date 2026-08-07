@@ -100,6 +100,11 @@ func addRunFlags(cmd *cobra.Command) error {
 		return err
 	}
 
+	cmd.Flags().String(FlagInterconnectRoCENetworksNS, "akash-rails", "Namespace scanned for multus NetworkAttachmentDefinitions to attach to GPU interconnect workloads on RoCE fabrics; every NAD found there is attached. Empty disables attachment")
+	if err := viper.BindPFlag(FlagInterconnectRoCENetworksNS, cmd.Flags().Lookup(FlagInterconnectRoCENetworksNS)); err != nil {
+		return err
+	}
+
 	cmd.Flags().Uint(FlagClusterNodePortQuantity, 1, "The number of node ports available on the Kubernetes cluster")
 	if err := viper.BindPFlag(FlagClusterNodePortQuantity, cmd.Flags().Lookup(FlagClusterNodePortQuantity)); err != nil {
 		return err
@@ -231,7 +236,7 @@ func addRunFlags(cmd *cobra.Command) error {
 		return err
 	}
 
-	cmd.Flags().Duration(FlagTxBroadcastTimeout, 30*time.Second, "tx broadcast timeout. defaults to 30s")
+	cmd.Flags().Duration(FlagTxBroadcastTimeout, cfg.BroadcastTimeout, "tx broadcast timeout. defaults to 30s")
 	if err := viper.BindPFlag(FlagTxBroadcastTimeout, cmd.Flags().Lookup(FlagTxBroadcastTimeout)); err != nil {
 		return err
 	}
@@ -248,16 +253,6 @@ func addRunFlags(cmd *cobra.Command) error {
 
 	cmd.Flags().Duration(FlagMonitorRetryPeriodJitter, 15*time.Second, "monitor status retry window. defaults to 15s")
 	if err := viper.BindPFlag(FlagMonitorRetryPeriodJitter, cmd.Flags().Lookup(FlagMonitorRetryPeriodJitter)); err != nil {
-		return err
-	}
-
-	cmd.Flags().Duration(FlagMonitorHealthcheckPeriod, 10*time.Second, "monitor healthcheck period. defaults to 10s")
-	if err := viper.BindPFlag(FlagMonitorHealthcheckPeriod, cmd.Flags().Lookup(FlagMonitorHealthcheckPeriod)); err != nil {
-		return err
-	}
-
-	cmd.Flags().Duration(FlagMonitorHealthcheckPeriodJitter, 5*time.Second, "monitor healthcheck window. defaults to 5s")
-	if err := viper.BindPFlag(FlagMonitorHealthcheckPeriodJitter, cmd.Flags().Lookup(FlagMonitorHealthcheckPeriodJitter)); err != nil {
 		return err
 	}
 
@@ -356,6 +351,26 @@ func addRunFlags(cmd *cobra.Command) error {
 
 	cmd.Flags().String(FlagGatewayProvider, "nginx", "Gateway provider: 'nginx' for NGINX Gateway Fabric (default)")
 	if err := viper.BindPFlag(FlagGatewayProvider, cmd.Flags().Lookup(FlagGatewayProvider)); err != nil {
+		return err
+	}
+
+	cmd.Flags().Bool(FlagAttestationWebhookEnabled, false, "Enable attestation sidecar mutating admission webhook for confidential compute")
+	if err := viper.BindPFlag(FlagAttestationWebhookEnabled, cmd.Flags().Lookup(FlagAttestationWebhookEnabled)); err != nil {
+		return err
+	}
+
+	cmd.Flags().Int(FlagAttestationWebhookPort, 9443, "Port for the attestation sidecar webhook server")
+	if err := viper.BindPFlag(FlagAttestationWebhookPort, cmd.Flags().Lookup(FlagAttestationWebhookPort)); err != nil {
+		return err
+	}
+
+	cmd.Flags().String(FlagAttestationSidecarImage, "", "Docker image for the attestation sidecar (required when webhook is enabled)")
+	if err := viper.BindPFlag(FlagAttestationSidecarImage, cmd.Flags().Lookup(FlagAttestationSidecarImage)); err != nil {
+		return err
+	}
+
+	cmd.Flags().Bool(FlagAttestationMockMode, false, "Run attestation sidecar in mock mode (synthetic reports, no TEE hardware). For local development only")
+	if err := viper.BindPFlag(FlagAttestationMockMode, cmd.Flags().Lookup(FlagAttestationMockMode)); err != nil {
 		return err
 	}
 

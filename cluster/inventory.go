@@ -36,6 +36,7 @@ import (
 	cfromctx "github.com/akash-network/provider/cluster/types/v1beta3/fromctx"
 	"github.com/akash-network/provider/event"
 	"github.com/akash-network/provider/operator/waiter"
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 	"github.com/akash-network/provider/tools/fromctx"
 	ptypes "github.com/akash-network/provider/types"
 )
@@ -47,6 +48,8 @@ var (
 	errInventoryReservation     = errors.New("inventory error")
 	errNoLeasedIPsAvailable     = fmt.Errorf("%w: no leased IPs available", errInventoryReservation)
 	errInsufficientIPs          = fmt.Errorf("%w: insufficient number of IPs", errInventoryReservation)
+
+	inventoryStatusQuantityZero = resource.NewQuantity(0, resource.DecimalSI)
 )
 
 var (
@@ -103,6 +106,7 @@ type inventoryService struct {
 	lc                     lifecycle.Lifecycle
 	waiter                 waiter.OperatorWaiter
 	availableExternalPorts uint
+	teePlatform            ctypes.TEEPlatform
 
 	clients struct {
 		ip        cip.Client
@@ -143,10 +147,16 @@ func newInventoryService(
 	is.clients.inventory = cfromctx.ClientInventoryFromContext(ctx)
 	is.clients.ip = cfromctx.ClientIPFromContext(ctx)
 
+	is.teePlatform = client.DetectTEEPlatform(ctx)
+	if is.teePlatform != ctypes.TEEPlatformNone {
+		is.log.Info("detected TEE platform", "platform", is.teePlatform)
+	}
+
 	reservations := make([]*reservation, 0, len(deployments))
 	for _, d := range deployments {
 		res := newReservation(d.LeaseID().OrderID(), d.ManifestGroup())
 		res.SetClusterParams(d.ClusterParams())
+		res.teeType = teeTypeFromClusterParams(d.ClusterParams())
 
 		reservations = append(reservations, res)
 	}
@@ -321,11 +331,35 @@ func (is *inventoryService) resourcesToCommit(rgroup dtypes.ResourceGroup) dtype
 
 	result := dtypes.GroupSpec{
 		Name:         rgroup.GetName(),
-		Requirements: atypes.PlacementRequirements{},
+		Requirements: placementRequirements(rgroup),
 		Resources:    replacedResources,
 	}
 
 	return result
+}
+
+// placementRequirements extracts the on-chain placement requirements from
+// the concrete ResourceGroup shapes the bid path produces. The committed
+// copy must carry them (CS-6 / AKT-406): the inventory client's Adjust
+// reads the `capabilities/gpu-interconnect/fabric/...` pin off
+// reservation.Resources() to gate interconnect node selection — an empty
+// Requirements here silently disabled the tenant's fabric pin.
+// Restart-recovered reservations are built from the off-chain manifest
+// group instead, which carries no requirements; those stay permissive
+// (their pods are already placed, only capacity re-accounting happens).
+func placementRequirements(rgroup dtypes.ResourceGroup) atypes.PlacementRequirements {
+	switch rg := rgroup.(type) {
+	case *dtypes.Group:
+		return rg.GroupSpec.Requirements
+	case dtypes.Group:
+		return rg.GroupSpec.Requirements
+	case *dtypes.GroupSpec:
+		return rg.Requirements
+	case dtypes.GroupSpec:
+		return rg.Requirements
+	default:
+		return atypes.PlacementRequirements{}
+	}
 }
 
 func (is *inventoryService) updateInventoryMetrics(metrics inventoryV1.Metrics) {
@@ -443,6 +477,67 @@ func leasedIPStatus(state *inventoryServiceState) inventoryV1.ResourcePair {
 		resource.DecimalSI)
 }
 
+// teeTypeFromResourceGroup extracts the TEE type from the placement requirement
+// attributes of a resource group (e.g. tee/type=cpu-gpu).
+func teeTypeFromResourceGroup(rg dtypes.ResourceGroup) ctypes.TEEType {
+	var attrs atypes.Attributes
+	switch v := rg.(type) {
+	case dtypes.GroupSpec:
+		attrs = v.Requirements.Attributes
+	case *dtypes.GroupSpec:
+		attrs = v.Requirements.Attributes
+	case dtypes.Group:
+		attrs = v.GroupSpec.Requirements.Attributes
+	case *dtypes.Group:
+		attrs = v.GroupSpec.Requirements.Attributes
+	default:
+		return ctypes.TEETypeNone
+	}
+	for _, attr := range attrs {
+		if attr.Key == "tee/type" {
+			t, err := ctypes.ParseTEEType(attr.Value)
+			if err == nil {
+				return t
+			}
+		}
+	}
+	return ctypes.TEETypeNone
+}
+
+// teeTypeFromClusterParams extracts the TEE type from stored cluster params
+// (used for existing reservations loaded at startup).
+func teeTypeFromClusterParams(cp interface{}) ctypes.TEEType {
+	var sparams []*crd.SchedulerParams
+	switch v := cp.(type) {
+	case *crd.ClusterSettings:
+		if v == nil {
+			return ctypes.TEETypeNone
+		}
+		sparams = v.SchedulerParams
+	case crd.ClusterSettings:
+		sparams = v.SchedulerParams
+	default:
+		return ctypes.TEETypeNone
+	}
+	for _, sp := range sparams {
+		if sp != nil && sp.TEEType != "" && !sp.AttestationDisabled {
+			t, err := ctypes.ParseTEEType(sp.TEEType)
+			if err == nil {
+				return t
+			}
+		}
+	}
+	return ctypes.TEETypeNone
+}
+
+func (is *inventoryService) adjustOpts(teeType ctypes.TEEType) []ctypes.InventoryOption {
+	opts := []ctypes.InventoryOption{ctypes.WithTEEPlatform(is.teePlatform)}
+	if teeType != ctypes.TEETypeNone {
+		opts = append(opts, ctypes.WithTEEType(teeType))
+	}
+	return opts
+}
+
 func (is *inventoryService) handleRequest(req inventoryRequest, state *inventoryServiceState) {
 	// convert the resources to the committed amount
 	resourcesToCommit := is.resourcesToCommit(req.resources)
@@ -472,7 +567,8 @@ func (is *inventoryService) handleRequest(req inventoryRequest, state *inventory
 		reservation.ipsConfirmed = true // No IPs, just mark it as confirmed implicitly
 	}
 
-	err := state.inventory.Adjust(reservation)
+	reservation.teeType = teeTypeFromResourceGroup(req.resources)
+	err := state.inventory.Adjust(reservation, is.adjustOpts(reservation.teeType)...)
 	if err != nil {
 		is.log.Info("insufficient capacity for reservation", "order", req.order)
 		inventoryRequestsCounter.WithLabelValues("reserve", "insufficient-capacity").Inc()
@@ -689,7 +785,7 @@ loop:
 			// readjust inventory accordingly with pending leases
 			for _, r := range state.reservations {
 				if !r.allocated {
-					if err := state.inventory.Adjust(r); err != nil {
+					if err := state.inventory.Adjust(r, is.adjustOpts(r.teeType)...); err != nil {
 						is.log.Error("adjust inventory for pending reservation", "error", err.Error())
 					}
 				}
@@ -789,7 +885,7 @@ func (is *inventoryService) runCheck(ctx context.Context, state *inventoryServic
 				// This error is not really fatal, so don't bail on this entirely. The other results
 				// retrieved in this code are still valid
 				is.log.Error("failed checking IP address usage", "orderID", confirmItem.orderID, "error", err)
-				break
+				continue
 			}
 
 			numConfirmed := uint(len(status))
@@ -840,8 +936,11 @@ func (is *inventoryService) getStatusV1(state *inventoryServiceState) (*provider
 		return nil, errInventoryNotAvailableYet
 	}
 
+	cluster := state.inventory.Snapshot()
+	sanitizeStatusCluster(&cluster)
+
 	status := &provider.Inventory{
-		Cluster:  state.inventory.Snapshot(),
+		Cluster:  cluster,
 		LeasedIP: leasedIPStatus(state),
 		Reservations: provider.Reservations{
 			Pending: provider.ReservationsMetric{
@@ -867,6 +966,37 @@ func (is *inventoryService) getStatusV1(state *inventoryServiceState) (*provider
 	}
 
 	return status, nil
+}
+
+func sanitizeStatusCluster(cluster *inventoryV1.Cluster) {
+	for idx := range cluster.Nodes {
+		sanitizeStatusNodeResources(&cluster.Nodes[idx].Resources)
+	}
+
+	for idx := range cluster.Storage {
+		sanitizeStatusResourcePair(&cluster.Storage[idx].Quantity)
+	}
+}
+
+func sanitizeStatusNodeResources(resources *inventoryV1.NodeResources) {
+	sanitizeStatusResourcePair(&resources.CPU.Quantity)
+	sanitizeStatusResourcePair(&resources.Memory.Quantity)
+	sanitizeStatusResourcePair(&resources.GPU.Quantity)
+	sanitizeStatusResourcePair(&resources.EphemeralStorage)
+	sanitizeStatusResourcePair(&resources.VolumesAttached)
+	sanitizeStatusResourcePair(&resources.VolumesMounted)
+}
+
+func sanitizeStatusResourcePair(pair *inventoryV1.ResourcePair) {
+	sanitizeStatusQuantity(pair.Capacity)
+	sanitizeStatusQuantity(pair.Allocatable)
+	sanitizeStatusQuantity(pair.Allocated)
+}
+
+func sanitizeStatusQuantity(quantity *resource.Quantity) {
+	if quantity.Cmp(*inventoryStatusQuantityZero) < 0 {
+		quantity.Set(0)
+	}
 }
 
 func reservationCountEndpoints(reservation *reservation) uint {

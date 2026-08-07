@@ -8,12 +8,15 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	tpubsub "github.com/troian/pubsub"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes"
 	kfake "k8s.io/client-go/kubernetes/fake"
 
+	inventoryV1 "pkg.akt.dev/go/inventory/v1"
 	manifest "pkg.akt.dev/go/manifest/v2beta3"
 	dvbeta "pkg.akt.dev/go/node/deployment/v1beta4"
 	mtypes "pkg.akt.dev/go/node/market/v1"
+	attrtypes "pkg.akt.dev/go/node/types/attributes/v1"
 	rtypes "pkg.akt.dev/go/node/types/resources/v1beta4"
 	"pkg.akt.dev/go/node/types/unit"
 	"pkg.akt.dev/go/testutil"
@@ -33,6 +36,26 @@ import (
 	afake "github.com/akash-network/provider/pkg/client/clientset/versioned/fake"
 	"github.com/akash-network/provider/tools/fromctx"
 )
+
+type statusTestInventory struct {
+	snapshot inventoryV1.Cluster
+}
+
+func (inv statusTestInventory) Adjust(ctypes.ReservationGroup, ...ctypes.InventoryOption) error {
+	return nil
+}
+
+func (inv statusTestInventory) Metrics() inventoryV1.Metrics {
+	return inventoryV1.Metrics{}
+}
+
+func (inv statusTestInventory) Snapshot() inventoryV1.Cluster {
+	return *inv.snapshot.Dup()
+}
+
+func (inv statusTestInventory) Dup() ctypes.Inventory {
+	return statusTestInventory{snapshot: *inv.snapshot.Dup()}
+}
 
 func TestInventory_reservationAllocatable(t *testing.T) {
 	mkrg := func(cpu uint64, gpu uint64, memory uint64, storage uint64, endpointsCount uint, count uint32) dvbeta.ResourceUnit {
@@ -461,6 +484,53 @@ func TestInventory_StatusV1SaturatesLeasedIPResourcePairAvailable(t *testing.T) 
 	require.Equal(t, int64(0), leasedIP.Available().Value())
 }
 
+func TestInventory_StatusV1SanitizesNegativeClusterSnapshot(t *testing.T) {
+	snapshot := inventoryV1.Cluster{
+		Nodes: inventoryV1.Nodes{
+			{
+				Name: "node",
+				Resources: inventoryV1.NodeResources{
+					CPU: inventoryV1.CPU{
+						Quantity: inventoryV1.NewResourcePairMilli(1000, -500, -250, resource.DecimalSI),
+					},
+					Memory: inventoryV1.Memory{
+						Quantity: inventoryV1.NewResourcePair(-1, 1024, -1, resource.DecimalSI),
+					},
+					GPU: inventoryV1.GPU{
+						Quantity: inventoryV1.NewResourcePair(4, -1, -1, resource.DecimalSI),
+					},
+					EphemeralStorage: inventoryV1.NewResourcePair(100, -1, -1, resource.DecimalSI),
+					VolumesAttached:  inventoryV1.NewResourcePair(0, 0, 0, resource.DecimalSI),
+					VolumesMounted:   inventoryV1.NewResourcePair(0, 0, 0, resource.DecimalSI),
+				},
+			},
+		},
+		Storage: inventoryV1.ClusterStorage{
+			{
+				Quantity: inventoryV1.NewResourcePair(50, -1, -1, resource.DecimalSI),
+				Info:     inventoryV1.StorageInfo{Class: "default"},
+			},
+		},
+	}
+
+	status, err := (&inventoryService{}).getStatusV1(&inventoryServiceState{
+		inventory: statusTestInventory{snapshot: snapshot},
+	})
+	require.NoError(t, err)
+
+	node := status.Cluster.Nodes[0]
+	require.Equal(t, int64(0), node.Resources.CPU.Quantity.Allocatable.MilliValue())
+	require.Equal(t, int64(0), node.Resources.CPU.Quantity.Allocated.MilliValue())
+	require.Equal(t, int64(0), node.Resources.Memory.Quantity.Capacity.Value())
+	require.Equal(t, int64(0), node.Resources.Memory.Quantity.Allocated.Value())
+	require.Equal(t, int64(0), node.Resources.GPU.Quantity.Allocatable.Value())
+	require.Equal(t, int64(0), node.Resources.GPU.Quantity.Allocated.Value())
+	require.Equal(t, int64(0), node.Resources.EphemeralStorage.Allocatable.Value())
+	require.Equal(t, int64(0), node.Resources.EphemeralStorage.Allocated.Value())
+	require.Equal(t, int64(0), status.Cluster.Storage[0].Quantity.Allocatable.Value())
+	require.Equal(t, int64(0), status.Cluster.Storage[0].Quantity.Allocated.Value())
+}
+
 func TestInventory_ReserveIPNoIPOperator(t *testing.T) {
 	config := Config{
 		InventoryResourcePollPeriod:     5 * time.Second,
@@ -778,4 +848,36 @@ func TestInventory_OverReservations(t *testing.T) {
 
 	// No ports used yet
 	require.Equal(t, uint(1000-countOfRandomPortService), inv.availableExternalPorts) // nolint: gosec
+}
+
+// placementRequirements must survive the resources-to-commit copy for every
+// concrete ResourceGroup shape the bid path produces — an empty extraction
+// silently disables the tenant's `capabilities/gpu-interconnect/fabric/...`
+// pin in the inventory client's Adjust (CS-6 / AKT-406 regression).
+func TestPlacementRequirementsPreserved(t *testing.T) {
+	attrs := attrtypes.Attributes{
+		{Key: "capabilities/gpu-interconnect", Value: "true"},
+		{Key: "capabilities/gpu-interconnect/fabric/infiniband", Value: "true"},
+	}
+	spec := dvbeta.GroupSpec{
+		Name: "ic",
+		Requirements: attrtypes.PlacementRequirements{
+			Attributes: attrs,
+		},
+	}
+
+	for name, rg := range map[string]dvbeta.ResourceGroup{
+		"GroupSpec":  spec,
+		"*GroupSpec": &spec,
+		"Group":      dvbeta.Group{GroupSpec: spec},
+		"*Group":     &dvbeta.Group{GroupSpec: spec},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, attrs, placementRequirements(rg).Attributes)
+		})
+	}
+
+	t.Run("unknown type stays permissive", func(t *testing.T) {
+		require.Empty(t, placementRequirements(nil).Attributes)
+	})
 }

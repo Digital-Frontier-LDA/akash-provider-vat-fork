@@ -38,6 +38,13 @@ const (
 	AkashLeaseManifestVersion     = "akash.network/manifest.version"
 	AkashLeaseUpdatedAt           = "akash.network/lease.updated_at"
 	AkashManifestResourceVersion  = "akash.network/manifest.resource.version"
+
+	// AkashInterconnectGroupLabelName labels every pod that participates in an
+	// SDL interconnect opt-in (implicit `auto` group from `interconnect: []`
+	// or an explicit name from `interconnect: { group: <name> }`). The
+	// workload builder uses it as the matchExpression for a per-group pod
+	// anti-affinity rule that spreads peers across distinct nodes.
+	AkashInterconnectGroupLabelName = "akash.network/interconnect-group"
 )
 
 const (
@@ -51,6 +58,32 @@ const (
 )
 
 const (
+	AkashAttestationDisabledAnnotation = "akash.network/attestation-disabled"
+)
+
+type RuntimeClass = ctypes.RuntimeClass
+
+const (
+	RuntimeClassKataQemuSNP          = ctypes.RuntimeClassKataQemuSNP
+	RuntimeClassKataQemuNvidiaGPUSNP = ctypes.RuntimeClassKataQemuNvidiaGPUSNP
+	RuntimeClassKataQemuTDX          = ctypes.RuntimeClassKataQemuTDX
+	RuntimeClassKataQemuNvidiaGPUTDX = ctypes.RuntimeClassKataQemuNvidiaGPUTDX
+)
+
+const megabytes int64 = 1024 * 1024
+
+const (
+	SidecarCPULimitMillicores    int64 = 100
+	SidecarMemoryLimitBytes      int64 = 64 * megabytes
+	SidecarCPURequestMillicores  int64 = 10
+	SidecarMemoryRequestBytes    int64 = 32 * megabytes
+	SidecarGPUMemoryLimitBytes   int64 = 128 * megabytes
+	SidecarGPUMemoryRequestBytes int64 = 64 * megabytes
+	MinPrimaryCPUMillicores      int64 = 10
+	MinPrimaryMemoryBytes        int64 = 16 * megabytes
+)
+
+const (
 	envVarAkashGroupSequence         = "AKASH_GROUP_SEQUENCE"
 	envVarAkashDeploymentSequence    = "AKASH_DEPLOYMENT_SEQUENCE"
 	envVarAkashOrderSequence         = "AKASH_ORDER_SEQUENCE"
@@ -59,6 +92,23 @@ const (
 	envVarAkashClusterPublicHostname = "AKASH_CLUSTER_PUBLIC_HOSTNAME"
 	envVarKubernetesServiceHost      = "KUBERNETES_SERVICE_HOST"
 	envVarKubernetesServicePort      = "KUBERNETES_SERVICE_PORT"
+
+	// NCCL tuning vars, injected only for services whose reservation
+	// pinned an interconnect HCA. Tenants may override any of these by
+	// setting the same key in service.env (addIfNotPresent honors that).
+	envVarNCCLIBDisable  = "NCCL_IB_DISABLE"
+	envVarNCCLIBHCA      = "NCCL_IB_HCA"
+	envVarNCCLIBGIDIndex = "NCCL_IB_GID_INDEX"
+)
+
+const (
+	// InterconnectFabricRoCE matches SchedulerResourceInterconnect.Fabric as
+	// stamped by tryAdjustInterconnect from the node's discovered link layer.
+	InterconnectFabricRoCE = "roce"
+
+	// multusNetworksAnnotation is the standard CNCF annotation multus watches
+	// to attach secondary networks (NetworkAttachmentDefinitions) to a pod.
+	multusNetworksAnnotation = "k8s.v1.cni.cncf.io/networks"
 )
 
 var (

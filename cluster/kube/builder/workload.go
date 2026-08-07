@@ -13,15 +13,46 @@ import (
 	"pkg.akt.dev/go/sdl"
 	sdlutil "pkg.akt.dev/go/sdl/util"
 
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 )
 
 const (
-	ResourceGPUNvidia = corev1.ResourceName("nvidia.com/gpu")
-	ResourceGPUAMD    = corev1.ResourceName("amd.com/gpu")
-	GPUVendorNvidia   = "nvidia"
-	GPUVendorAMD      = "amd"
+	ResourceGPUNvidia     = corev1.ResourceName("nvidia.com/gpu")
+	ResourceGPUNvidiaPGPU = corev1.ResourceName("nvidia.com/pgpu")
+	ResourceGPUAMD        = corev1.ResourceName("amd.com/gpu")
+	GPUVendorNvidia       = "nvidia"
+	GPUVendorAMD          = "amd"
 )
+
+type RuntimeClassOption = ctypes.RuntimeClassOption
+
+var (
+	WithCC  = ctypes.WithCC
+	WithGPU = ctypes.WithGPU
+	WithSNP = ctypes.WithSNP
+	WithTDX = ctypes.WithTDX
+)
+
+// RuntimeClassForTEEType maps a TEE type ("cpu", "cpu-gpu") to the corresponding
+// Kata runtime class using the detected TEE platform ("tdx" or "snp").
+func RuntimeClassForTEEType(teeType string, teePlatform string) RuntimeClass {
+	isGPU := teeType == "cpu-gpu"
+	switch teePlatform {
+	case "tdx":
+		if isGPU {
+			return RuntimeClassKataQemuNvidiaGPUTDX
+		}
+		return RuntimeClassKataQemuTDX
+	case "snp":
+		if isGPU {
+			return RuntimeClassKataQemuNvidiaGPUSNP
+		}
+		return RuntimeClassKataQemuSNP
+	default:
+		return ""
+	}
+}
 
 type workloadBase interface {
 	builderBase
@@ -94,17 +125,38 @@ func (b *Workload) container() corev1.Container {
 			Requests: make(corev1.ResourceList),
 		},
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		SecurityContext: &corev1.SecurityContext{
-			RunAsNonRoot:             &falseValue,
-			Privileged:               &falseValue,
-			AllowPrivilegeEscalation: &falseValue,
-		},
+	}
+
+	sidecarEnabled := sparams != nil &&
+		sparams.RuntimeClass.Is(WithCC()) &&
+		!sparams.AttestationDisabled
+
+	kcontainer.SecurityContext = &corev1.SecurityContext{
+		RunAsNonRoot:             &falseValue,
+		Privileged:               &falseValue,
+		AllowPrivilegeEscalation: &falseValue,
 	}
 
 	if cpu := service.Resources.CPU; cpu != nil {
-		requestedCPU := sdlutil.ComputeCommittedResources(b.settings.CPUCommitLevel, cpu.Units)
-		kcontainer.Resources.Requests[corev1.ResourceCPU] = resource.NewScaledQuantity(int64(requestedCPU.Value()), resource.Milli).DeepCopy() // nolint: gosec
-		kcontainer.Resources.Limits[corev1.ResourceCPU] = resource.NewScaledQuantity(int64(cpu.Units.Value()), resource.Milli).DeepCopy()      // nolint: gosec
+		cpuLimit := int64(cpu.Units.Value())                                                                 // nolint: gosec
+		cpuRequest := int64(sdlutil.ComputeCommittedResources(b.settings.CPUCommitLevel, cpu.Units).Value()) // nolint: gosec
+
+		if sidecarEnabled {
+			cpuLimit -= SidecarCPULimitMillicores
+			cpuRequest -= SidecarCPURequestMillicores
+			if cpuLimit < MinPrimaryCPUMillicores {
+				cpuLimit = MinPrimaryCPUMillicores
+			}
+			if cpuRequest < MinPrimaryCPUMillicores {
+				cpuRequest = MinPrimaryCPUMillicores
+			}
+			if cpuRequest > cpuLimit {
+				cpuRequest = cpuLimit
+			}
+		}
+
+		kcontainer.Resources.Requests[corev1.ResourceCPU] = resource.NewScaledQuantity(cpuRequest, resource.Milli).DeepCopy()
+		kcontainer.Resources.Limits[corev1.ResourceCPU] = resource.NewScaledQuantity(cpuLimit, resource.Milli).DeepCopy()
 	}
 
 	if gpu := service.Resources.GPU; gpu != nil && gpu.Units.Value() > 0 {
@@ -112,7 +164,11 @@ func (b *Workload) container() corev1.Container {
 
 		switch sparams.Resources.GPU.Vendor {
 		case GPUVendorNvidia:
-			resourceName = ResourceGPUNvidia
+			if sparams.RuntimeClass.Is(WithCC()) {
+				resourceName = ResourceGPUNvidiaPGPU // VFIO passthrough for CC
+			} else {
+				resourceName = ResourceGPUNvidia
+			}
 		case GPUVendorAMD:
 			resourceName = ResourceGPUAMD
 		default:
@@ -126,6 +182,21 @@ func (b *Workload) container() corev1.Container {
 		requestedGPU := sdlutil.ComputeCommittedResources(b.settings.GPUCommitLevel, gpu.Units)
 		kcontainer.Resources.Requests[resourceName] = resource.NewQuantity(int64(requestedGPU.Value()), resource.DecimalSI).DeepCopy() // nolint: gosec
 		kcontainer.Resources.Limits[resourceName] = resource.NewQuantity(int64(gpu.Units.Value()), resource.DecimalSI).DeepCopy()      // nolint: gosec
+	}
+
+	// interconnect HCA extended resource. The reservation Adjust step stamped
+	// `sparams.Resources.Interconnect` when the per-service `gpu.attributes.interconnect`
+	// opt-in was set and the chosen node advertised GPU interconnect capacity. The
+	// resource name was harvested by the inventory operator from kubelet
+	// allocatable (e.g. `rdma/rdma_shared_device_ib`); the count is the
+	// 1:1 GPU.Units value pinned at Adjust time. Requests==Limits because
+	// interconnect, like GPU, is an integer kubelet device-plugin resource and
+	// the kubelet rejects mismatched req/limit for those.
+	if ic := sparamsInterconnect(sparams); ic != nil && ic.Enabled && ic.ResourceName != "" {
+		resourceName := corev1.ResourceName(ic.ResourceName)
+		q := resource.NewQuantity(int64(ic.Units), resource.DecimalSI).DeepCopy() // nolint: gosec
+		kcontainer.Resources.Requests[resourceName] = q
+		kcontainer.Resources.Limits[resourceName] = q
 	}
 
 	var requestedMem uint64
@@ -148,11 +219,32 @@ func (b *Workload) container() corev1.Container {
 		}
 	}
 
-	// fixme: ram is never expected to be nil
 	if mem := service.Resources.Memory; mem != nil {
-		requestedRAM := sdlutil.ComputeCommittedResources(b.settings.MemoryCommitLevel, mem.Quantity)
-		kcontainer.Resources.Requests[corev1.ResourceMemory] = resource.NewQuantity(int64(requestedRAM.Value()), resource.DecimalSI).DeepCopy()            // nolint: gosec
-		kcontainer.Resources.Limits[corev1.ResourceMemory] = resource.NewQuantity(int64(mem.Quantity.Value()+requestedMem), resource.DecimalSI).DeepCopy() // nolint: gosec
+		memLimit := int64(mem.Quantity.Value() + requestedMem)                                                     // nolint: gosec
+		memRequest := int64(sdlutil.ComputeCommittedResources(b.settings.MemoryCommitLevel, mem.Quantity).Value()) // nolint: gosec
+
+		if sidecarEnabled {
+			sidecarMemLimit := SidecarMemoryLimitBytes
+			sidecarMemRequest := SidecarMemoryRequestBytes
+			if sparams.RuntimeClass.Is(WithGPU()) {
+				sidecarMemLimit = SidecarGPUMemoryLimitBytes
+				sidecarMemRequest = SidecarGPUMemoryRequestBytes
+			}
+			memLimit -= sidecarMemLimit
+			memRequest -= sidecarMemRequest
+			if memLimit < MinPrimaryMemoryBytes {
+				memLimit = MinPrimaryMemoryBytes
+			}
+			if memRequest < MinPrimaryMemoryBytes {
+				memRequest = MinPrimaryMemoryBytes
+			}
+			if memRequest > memLimit {
+				memRequest = memLimit
+			}
+		}
+
+		kcontainer.Resources.Requests[corev1.ResourceMemory] = resource.NewQuantity(memRequest, resource.DecimalSI).DeepCopy()
+		kcontainer.Resources.Limits[corev1.ResourceMemory] = resource.NewQuantity(memLimit, resource.DecimalSI).DeepCopy()
 	}
 
 	if service.Params != nil {
@@ -188,7 +280,6 @@ func (b *Workload) container() corev1.Container {
 	return kcontainer
 }
 
-// Return RAM volumes
 func (b *Workload) volumes() []corev1.Volume {
 	var volumes []corev1.Volume // nolint:prealloc
 
@@ -264,16 +355,42 @@ func (b *Workload) persistentVolumeClaims() []corev1.PersistentVolumeClaim {
 	return pvcs
 }
 
+func (b *Workload) podAnnotations() map[string]string {
+	params := b.sparams[b.serviceIdx]
+
+	var obj map[string]string
+
+	if params != nil && params.AttestationDisabled {
+		obj = map[string]string{
+			AkashAttestationDisabledAnnotation: "true",
+		}
+	}
+
+	// RoCEv2 resolves the remote rail IP through the pod's own network
+	// namespace, so interconnect pods on a RoCE fabric need the rail
+	// netdevs attached — the RDMA verbs device alone cannot complete
+	// QP setup. InfiniBand is LID-addressed and skips this entirely.
+	if ic := sparamsInterconnect(params); ic != nil && ic.Enabled && ic.Fabric == InterconnectFabricRoCE {
+		if networks := strings.TrimSpace(b.settings.InterconnectRoCENetworks); networks != "" {
+			if obj == nil {
+				obj = make(map[string]string, 1)
+			}
+			obj[multusNetworksAnnotation] = networks
+		}
+	}
+
+	return obj
+}
+
 func (b *Workload) runtimeClass() *string {
 	params := b.sparams[b.serviceIdx]
 
 	var effectiveRuntimeClassName *string
 
 	if params != nil {
-		if len(params.RuntimeClass) != 0 && params.RuntimeClass != runtimeClassNoneValue {
-			runtimeClass := new(string)
-			*runtimeClass = params.RuntimeClass
-			effectiveRuntimeClassName = runtimeClass
+		rc := string(params.RuntimeClass)
+		if len(rc) != 0 && rc != runtimeClassNoneValue {
+			effectiveRuntimeClassName = &rc
 		}
 	}
 
@@ -305,6 +422,38 @@ func (b *Workload) affinity() *corev1.Affinity {
 		selectors = append(selectors, nodeSelectorsFromResources(params.Resources)...)
 	}
 
+	if params != nil && params.RuntimeClass.Is(WithCC()) {
+		selectors = append(selectors, corev1.NodeSelectorRequirement{
+			Key:      "katacontainers.io/kata-runtime",
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{"true"},
+		})
+
+		// TEE-specific node labels
+		if params.RuntimeClass.Is(WithSNP()) {
+			selectors = append(selectors, corev1.NodeSelectorRequirement{
+				Key:      "amd.feature.node.kubernetes.io/snp",
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{"true"},
+			})
+		}
+		if params.RuntimeClass.Is(WithTDX()) {
+			selectors = append(selectors, corev1.NodeSelectorRequirement{
+				Key:      "intel.feature.node.kubernetes.io/tdx",
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{"true"},
+			})
+		}
+
+		if params.RuntimeClass.Is(WithGPU()) {
+			selectors = append(selectors, corev1.NodeSelectorRequirement{
+				Key:      "nvidia.com/cc.ready.state",
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{"true"},
+			})
+		}
+	}
+
 	for _, storage := range service.Resources.Storage {
 		attr := storage.Attributes.Find(sdl.StorageAttributePersistent)
 		if persistent, valid := attr.AsBool(); !valid || !persistent {
@@ -333,6 +482,43 @@ func (b *Workload) affinity() *corev1.Affinity {
 				},
 			},
 		},
+	}
+
+	// Per-group anti-affinity. A service that opts into interconnect
+	// (implicit `interconnect: []` resolves to the `auto` group, explicit
+	// `interconnect: { group: <name> }` carries the chosen name) must
+	// have its replicas — and any other services that share the same
+	// group label — land on distinct nodes. We allocate one interconnect
+	// HCA per GPU per node and peers in a group expect a 1:1 GPU:HCA
+	// fanout. Requirement (not preference) so the kube scheduler
+	// hard-rejects co-location.
+	//
+	// Scoping the LabelSelector to the same deployment namespace is
+	// implicit — pod affinity is namespace-scoped by default — so two
+	// tenants who happen to pick `group: pair0` cannot collide.
+	//
+	// AKT-443: the bid engine is also group-aware. The chain SDK
+	// serializes `interconnect/group` into the on-chain
+	// Resources.GPU.Attributes (in addition to the off-chain
+	// Service.InterconnectGroup field used here), and the provider's
+	// reservation Adjust step tracks per-group node claims and refuses
+	// to fit two peers from the same group on the same node. So the
+	// bid declines a group it can't actually schedule — pods no longer
+	// end up Pending because the bid step accepted what the kube
+	// scheduler couldn't.
+	if rg := service.InterconnectGroup; rg != "" {
+		affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							AkashInterconnectGroupLabelName: rg,
+						},
+					},
+					TopologyKey: "kubernetes.io/hostname",
+				},
+			},
+		}
 	}
 
 	return affinity
@@ -368,7 +554,7 @@ func nodeSelectorsFromResources(res *crd.SchedulerResources) []corev1.NodeSelect
 
 		if gpu.Interface != "" {
 			selectors = append(selectors, corev1.NodeSelectorRequirement{
-				Key:      fmt.Sprintf("%s.interface.%s", key, gpu.MemorySize),
+				Key:      fmt.Sprintf("%s.interface.%s", key, gpu.Interface),
 				Operator: corev1.NodeSelectorOpGt,
 				Values: []string{
 					"0",
@@ -382,7 +568,16 @@ func nodeSelectorsFromResources(res *crd.SchedulerResources) []corev1.NodeSelect
 
 func (b *Workload) labels() map[string]string {
 	obj := b.builder.labels()
-	obj[AkashManifestServiceLabelName] = b.deployment.ManifestGroup().Services[b.serviceIdx].Name
+	svc := b.deployment.ManifestGroup().Services[b.serviceIdx]
+	obj[AkashManifestServiceLabelName] = svc.Name
+
+	// Stamp the interconnect-group label only for services that opted in to a
+	// peer group. The pod anti-affinity rule built in affinity() keys
+	// off this label; omitting it on non-interconnect services keeps the label
+	// space tight and prevents accidental cross-deployment matches.
+	if svc.InterconnectGroup != "" {
+		obj[AkashInterconnectGroupLabelName] = svc.InterconnectGroup
+	}
 
 	return obj
 }
@@ -420,7 +615,42 @@ func (b *Workload) addEnvVarsForDeployment(envVarsAlreadyAdded map[string]int, e
 	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashProvider, lid.Provider)
 	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashClusterPublicHostname, b.settings.ClusterPublicHostname)
 
+	// NCCL knobs for interconnect workloads. Injected only when the reservation
+	// Adjust step pinned an interconnect HCA for this service. addIfNotPresent
+	// respects an SDL-supplied override — e.g. a tenant that needs
+	// `NCCL_IB_HCA=mlx5_0,mlx5_1` to pin specific HCAs will set it in
+	// `service.env` and we won't clobber it. NCCL_IB_DISABLE=0 is the
+	// safe default that opts NCCL into IB even when the container image
+	// or base CUDA distro defaulted it off.
+	//
+	// NCCL_IB_HCA is joined from the array NCCLHCAPrefixes — NCCL accepts a
+	// comma-separated list natively, so mixed-vendor hosts like
+	// ["mlx5","bnxt_re"] just emit `NCCL_IB_HCA=mlx5,bnxt_re`.
+	//
+	// NCCL_IB_GID_INDEX is deliberately NOT injected, for RoCE included.
+	// RoCE pods reach the rail through multus-attached netdevs in their own
+	// network namespace (see podAnnotations); the RoCEv2 GIDs those netdevs
+	// register land at a pod-specific index (host GID entries are not
+	// visible from the pod netns), so any fixed value is wrong. NCCL
+	// auto-selects the RoCEv2 GID from the pod's table, which is correct on
+	// both fabrics. Tenants can still pin an index via service.env.
+	if ic := sparamsInterconnect(b.sparams[b.serviceIdx]); ic != nil && ic.Enabled {
+		env = addIfNotPresent(envVarsAlreadyAdded, env, envVarNCCLIBDisable, "0")
+		if hca := strings.Join(ic.NCCLHCAPrefixes, ","); hca != "" {
+			env = addIfNotPresent(envVarsAlreadyAdded, env, envVarNCCLIBHCA, hca)
+		}
+	}
+
 	return env
+}
+
+// sparamsInterconnect pulls the per-service interconnect scheduler params off a nullable
+// SchedulerParams chain. Returns nil when the service has no interconnect pin.
+func sparamsInterconnect(sparams *crd.SchedulerParams) *crd.SchedulerResourceInterconnect {
+	if sparams == nil || sparams.Resources == nil {
+		return nil
+	}
+	return sparams.Resources.Interconnect
 }
 
 // getWorkloadPermissions extracts all permission types from the service params

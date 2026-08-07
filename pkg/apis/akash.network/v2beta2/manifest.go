@@ -57,6 +57,11 @@ type ManifestService struct {
 	Params          *ManifestServiceParams      `json:"params,omitempty"`
 	SchedulerParams *SchedulerParams            `json:"scheduler_params,omitempty"`
 	Credentials     *ManifestServiceCredentials `json:"credentials,omitempty"`
+	// InterconnectGroup is the SDL gpu.attributes.interconnect_group peer-group label.
+	// Workload builder reads this to apply per-group pod anti-affinity so
+	// that the K8s scheduler spreads peers of one group across distinct
+	// nodes. Empty string means no interconnect_group was declared.
+	InterconnectGroup string `json:"interconnect_group,omitempty"`
 }
 
 // ManifestGroup stores metadata, name and list of SDL manifest services
@@ -105,13 +110,36 @@ type SchedulerResourceGPU struct {
 	Interface  string `json:"interface"`
 }
 
+// SchedulerResourceInterconnect is the per-service interconnect allocation that the
+// reservation Adjust step pins on a successful bid. The K8s workload
+// builder reads it to (a) add the extended resource request/limit named
+// by ResourceName, (b) inject the NCCL env vars that target the fabric.
+//
+// 1:1 invariant: when Enabled is true, Units == res.GPU.Units.Value(). The
+// inventory operator publishes ResourceName and NCCLHCAPrefixes from the
+// chosen node's kubelet device-plugin advert and infiniband sysfs scan;
+// Fabric is "infiniband" or "roce". NCCLHCAPrefixes carries every HCA
+// device-name family present on the node (e.g. ["mlx5"] on a uniform
+// Mellanox host, ["mlx5","bnxt_re"] on mixed-vendor); the workload builder
+// joins with commas for NCCL_IB_HCA, which NCCL accepts natively.
+type SchedulerResourceInterconnect struct {
+	Enabled         bool     `json:"enabled"`
+	Units           uint64   `json:"units"`
+	ResourceName    string   `json:"resource_name"`
+	Fabric          string   `json:"fabric"`
+	NCCLHCAPrefixes []string `json:"nccl_hca_prefixes"`
+}
+
 type SchedulerResources struct {
-	GPU *SchedulerResourceGPU `json:"gpu"`
+	GPU          *SchedulerResourceGPU          `json:"gpu"`
+	Interconnect *SchedulerResourceInterconnect `json:"interconnect,omitempty"`
 }
 
 type SchedulerParams struct {
-	RuntimeClass string              `json:"runtime_class"`
-	Resources    *SchedulerResources `json:"resources,omitempty"`
+	RuntimeClass        ctypes.RuntimeClass `json:"runtime_class"`
+	Resources           *SchedulerResources `json:"resources,omitempty"`
+	AttestationDisabled bool                `json:"attestation_disabled,omitempty"`
+	TEEType             string              `json:"tee_type,omitempty"`
 }
 
 type ClusterSettings struct {
@@ -145,7 +173,7 @@ type ManifestServiceExposeHTTPOptions struct {
 // NewManifest creates new manifest with provided details. Returns error in case of failure.
 func NewManifest(ns string, lid mtypes.LeaseID, mgroup *mani.Group, settings ClusterSettings) (*Manifest, error) {
 	if len(mgroup.Services) != len(settings.SchedulerParams) {
-		return nil, fmt.Errorf("%w: group services don't not match scheduler services count (%d) != (%d)",
+		return nil, fmt.Errorf("%w: group services count does not match scheduler services count (%d) != (%d)",
 			ErrInvalidArgs,
 			len(mgroup.Services),
 			len(settings.SchedulerParams),
@@ -185,12 +213,15 @@ func (m *Manifest) Deployment() (ctypes.IDeployment, error) {
 		return nil, err
 	}
 
+	cparams := make(ReservationClusterSettings, len(group.Services))
+	for i := range group.Services {
+		cparams[group.Services[i].Resources.ID] = schedulerParams[i]
+	}
+
 	return &deployment{
-		lid:   lid,
-		group: group,
-		cparams: ClusterSettings{
-			SchedulerParams: schedulerParams,
-		},
+		lid:             lid,
+		group:           group,
+		cparams:         cparams,
 		resourceVersion: m.ResourceVersion,
 	}, nil
 }
@@ -243,14 +274,15 @@ func (ms *ManifestService) fromCRD() (mani.Service, error) {
 	}
 
 	ams := &mani.Service{
-		Name:      ms.Name,
-		Image:     ms.Image,
-		Command:   ms.Command,
-		Args:      ms.Args,
-		Env:       ms.Env,
-		Resources: res,
-		Count:     ms.Count,
-		Expose:    make([]mani.ServiceExpose, 0, len(ms.Expose)),
+		Name:              ms.Name,
+		Image:             ms.Image,
+		Command:           ms.Command,
+		Args:              ms.Args,
+		Env:               ms.Env,
+		Resources:         res,
+		Count:             ms.Count,
+		Expose:            make([]mani.ServiceExpose, 0, len(ms.Expose)),
+		InterconnectGroup: ms.InterconnectGroup,
 	}
 
 	if ms.Credentials != nil {
@@ -312,16 +344,31 @@ func manifestServiceFromProvider(ams mani.Service, schedulerParams *SchedulerPar
 		return ManifestService{}, err
 	}
 
+	// Set runtime class and attestation from TEE service params.
+	// Note: proto3 bool defaults to false, but the intended default for attestation
+	// is true (sidecar injected). The Go SDL builder always sets this explicitly.
+	// Non-Go producers must set attestation=true when sidecar injection is desired.
+	if ams.Params != nil && ams.Params.TEE != nil {
+		if schedulerParams == nil {
+			schedulerParams = &SchedulerParams{}
+		}
+		schedulerParams.TEEType = ams.Params.TEE.Type
+		if !ams.Params.TEE.Attestation {
+			schedulerParams.AttestationDisabled = true
+		}
+	}
+
 	ms := ManifestService{
-		Name:            ams.Name,
-		Image:           ams.Image,
-		Command:         ams.Command,
-		Args:            ams.Args,
-		Env:             ams.Env,
-		Resources:       resources,
-		Count:           ams.Count,
-		Expose:          make([]ManifestServiceExpose, 0, len(ams.Expose)),
-		SchedulerParams: schedulerParams,
+		Name:              ams.Name,
+		Image:             ams.Image,
+		Command:           ams.Command,
+		Args:              ams.Args,
+		Env:               ams.Env,
+		Resources:         resources,
+		Count:             ams.Count,
+		Expose:            make([]ManifestServiceExpose, 0, len(ams.Expose)),
+		SchedulerParams:   schedulerParams,
+		InterconnectGroup: ams.InterconnectGroup,
 	}
 
 	for _, expose := range ams.Expose {
