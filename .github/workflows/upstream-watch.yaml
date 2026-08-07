@@ -112,7 +112,15 @@ jobs:
           # force-updated and the PR opened.
           # --state all, not open: a CLOSED rebase PR is a human decision to
           # skip that release, and re-opening it every morning would be spam.
-          # Reopen the PR (or delete the branch) to make the watcher retry.
+          # A merged PR needs no special case — it advances UPSTREAM_TAG, so the
+          # equality check above already exits first.
+          #
+          # Consequence, deliberate: once a PR exists for this tag in ANY state,
+          # the watcher will never recreate it. A closed one permanently
+          # suppresses automatic retries for that release — neither reopening it
+          # nor deleting the branch brings the watcher back, because a closed PR
+          # still matches here. Picking that release back up is a manual job:
+          # push the branch and reopen the PR yourself.
           if [ -n "$(gh pr list --head "${BRANCH}" --state all --json number --jq '.[].number')" ]; then
             echo "A rebase PR for ${BRANCH} already exists (any state) — nothing to do."
             exit 0
