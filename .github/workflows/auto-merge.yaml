@@ -72,9 +72,12 @@ jobs:
             echo "Guard passed: df-telemetry/ untouched by this rebase."
           else
             echo "Guard tripped: df-telemetry/ changed — human review required."
+            # Never let labelling decide the outcome — the guard tripping is
+            # the finding; the label is only how it is surfaced. (upstream-watch
+            # lost three upstream releases to a `--label` on a missing label.)
             gh pr edit "${PR_NUMBER}" \
               --add-label needs-human \
-              --add-label "conflict:our-hook"
+              --add-label "conflict:our-hook" || true
             exit 1
           fi
 
