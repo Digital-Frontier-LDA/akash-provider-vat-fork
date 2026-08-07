@@ -6,6 +6,19 @@
 # this workflow is the "fully automatable" half. The auto-merge.yaml workflow
 # decides whether the resulting PR may merge unattended.
 #
+# "Rebase" here means replaying the fork delta (${UPSTREAM_TAG}..main, ~42 files,
+# only 2 of them upstream-tracked) onto the new upstream tag — NOT `git rebase`
+# of main. main's history cannot be replayed: each upstream adoption lands as a
+# single squash commit carrying a whole upstream version jump.
+#
+# Silent-failure history worth keeping in mind when changing this file: between
+# 2026-07-28 and 2026-08-07 it detected v0.16.0, v0.16.1 and v0.16.2, pushed a
+# branch for each, and opened NO PR for any of them — `gh pr create --label
+# needs-human` failed because that label did not exist in the repo, and the next
+# day's run saw the orphan branch and exited 0. Two invariants came out of that:
+# idempotency keys on the PR (never the branch), and no label operation is ever
+# allowed to fail the run.
+#
 # This workflow does NOT bump UPSTREAM_TAG — the rebase PR's own diff carries
 # the UPSTREAM_TAG bump, so the pin only advances when the PR actually merges.
 #
@@ -90,15 +103,43 @@ jobs:
 
           BRANCH="rebase/${LATEST}"
 
-          # Idempotent: do not open a duplicate branch or PR.
+          # Idempotency keys on the PR, NOT on the branch. Keying on the branch
+          # wedges the watcher permanently: the branch is pushed BEFORE
+          # `gh pr create` runs, so any failure after the push (a missing label
+          # once cost us v0.16.0, v0.16.1 and v0.16.2) leaves an orphan branch
+          # that makes every subsequent run exit 0 with "already exists" — a
+          # green run that silently drops the release. An orphan branch is now
+          # force-updated and the PR opened.
+          # --state all, not open: a CLOSED rebase PR is a human decision to
+          # skip that release, and re-opening it every morning would be spam.
+          # A merged PR needs no special case — it advances UPSTREAM_TAG, so the
+          # equality check above already exits first.
+          #
+          # Consequence, deliberate: once a PR exists for this tag in ANY state,
+          # the watcher will never recreate it. A closed one permanently
+          # suppresses automatic retries for that release — neither reopening it
+          # nor deleting the branch brings the watcher back, because a closed PR
+          # still matches here. Picking that release back up is a manual job:
+          # push the branch and reopen the PR yourself.
+          if [ -n "$(gh pr list --head "${BRANCH}" --state all --json number --jq '.[].number')" ]; then
+            echo "A rebase PR for ${BRANCH} already exists (any state) — nothing to do."
+            exit 0
+          fi
           if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
-            echo "Branch ${BRANCH} already exists on origin — skipping."
-            exit 0
+            echo "Branch ${BRANCH} exists with no PR — orphaned by an earlier failed run. Rebuilding it."
           fi
-          if [ -n "$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[].number')" ]; then
-            echo "An open rebase PR for ${BRANCH} already exists — skipping."
-            exit 0
-          fi
+
+          # The labels the conflict path applies must exist before it applies
+          # them: `gh pr create --label <missing>` fails the whole command AFTER
+          # the branch push, which is exactly how the v0.16.x releases were lost.
+          # Creating them here is idempotent and keeps the workflow independent
+          # of manual repo state.
+          gh label create needs-human --color d93f0b \
+            --description "Automated handling gave up — a human must take this" || true
+          gh label create "conflict:upstream-refactor" --color b60205 \
+            --description "Upstream refactored the code our patch attaches to" || true
+          gh label create "conflict:our-hook" --color b60205 \
+            --description "The rebase modified df-telemetry/ — tree-hash guard tripped" || true
 
           git config user.name  "df-upstream-watch[bot]"
           git config user.email "df-upstream-watch@users.noreply.github.com"
@@ -106,32 +147,50 @@ jobs:
           git remote add upstream https://github.com/akash-network/provider.git || true
           git fetch upstream --tags --quiet
 
-          git checkout -b "${BRANCH}" main
+          # Replay the fork delta onto the new upstream tag, rather than
+          # rebasing main onto it. `main` cannot be rebased: each upstream
+          # adoption lands as a SQUASH merge (e.g. 46512f8 for v0.14.2), so
+          # replaying main's history re-applies an entire upstream version jump
+          # as one commit and conflicts against every later release — the reason
+          # every v0.16.x run reported "hit conflicts". The fork delta is
+          # `${CURRENT}..main` restricted to our own files, which is small (~42
+          # files, 2 of them upstream-tracked), and a 3-way apply onto
+          # ${LATEST} is the operation a rebase was only ever approximating.
+          # Anchor the delta's endpoint to origin/main by SHA. NOT `HEAD`: on
+          # workflow_dispatch actions/checkout checks out whatever ref was
+          # dispatched, so HEAD can be some feature branch and the PR would
+          # carry that branch's delta while claiming to be a main rebase. The
+          # PR's base is main, so main is the only correct endpoint.
+          git fetch origin main --quiet
+          FORK_HEAD=$(git rev-parse origin/main)
+          echo "fork delta endpoint: origin/main = ${FORK_HEAD}"
+          git checkout -b "${BRANCH}" "${LATEST}"
 
-          # Attempt the rebase. A conflicting rebase is NOT silently aborted and
-          # discarded — instead we abort the in-progress rebase (so the branch
-          # is pushable), open the PR from the un-rebased branch, and label it
-          # so a human knows a manual rebase is required. A conflicted-but-
-          # informative PR beats a silently-skipped upstream release.
           REBASE_STATUS="clean"
-          if ! git rebase "${LATEST}"; then
-            git rebase --abort
+          git diff "${CURRENT}" "${FORK_HEAD}" --output=/tmp/fork-delta.patch
+          if git apply -3 --whitespace=nowarn /tmp/fork-delta.patch; then
+            git add -A
+          else
             REBASE_STATUS="conflicts"
-            echo "Rebase onto ${LATEST} hit conflicts — opening a PR that flags a manual rebase."
+            echo "Replaying the fork delta onto ${LATEST} hit conflicts — opening a PR that flags a manual rebase."
+            # Keep the conflict markers in the branch so the human sees exactly
+            # where upstream moved under our patch, rather than an empty diff.
+            git add -A || true
           fi
 
-          # On a clean rebase, advance the pin in the branch so the PR's diff
-          # actually carries the UPSTREAM_TAG bump (the clean-case PR body claims
-          # it does). Without this the merged PR leaves UPSTREAM_TAG stale and the
-          # next run re-rebases the SAME release forever. The conflicts case is
-          # deliberately left for a human (they bump UPSTREAM_TAG while resolving).
-          if [ "${REBASE_STATUS}" = "clean" ] && [ "$(cat UPSTREAM_TAG)" != "${LATEST}" ]; then
-            printf '%s\n' "${LATEST}" > UPSTREAM_TAG
-            git add UPSTREAM_TAG
-            git commit -m "chore: bump UPSTREAM_TAG to ${LATEST}"
-          fi
+          # Advance the pin in the branch so the PR's diff carries the
+          # UPSTREAM_TAG bump. Without it the merged PR leaves UPSTREAM_TAG
+          # stale and the next run re-adopts the SAME release forever. Done in
+          # both cases now: the conflict PR is a real branch a human finishes in
+          # place, so it should already carry the pin it is moving to.
+          printf '%s\n' "${LATEST}" > UPSTREAM_TAG
+          git add UPSTREAM_TAG
+          git commit -m "rebase: adopt upstream ${LATEST} into main"
 
-          git push origin "${BRANCH}"
+          # --force only ever rewrites an ORPHAN branch: the PR check above
+          # already exited when any PR (open, closed or merged) exists for this
+          # head, so there is no review in progress to clobber.
+          git push --force origin "${BRANCH}"
 
           NOTES=$(gh api "repos/akash-network/provider/releases/tags/${LATEST}" --jq .body || echo "(release notes unavailable)")
 
@@ -150,9 +209,18 @@ jobs:
               "Resolve conflicts locally, then update \`UPSTREAM_TAG\` to \`${LATEST}\` in this branch." \
               "### Upstream release notes (${LATEST})
           ${NOTES}")
-            gh pr create --base main --head "${BRANCH}" \
+            # Capture the URL gh prints, and edit by URL rather than by branch
+            # name: branch-name resolution is ambiguous in a fork, and the
+            # `|| true` below would swallow the miss, leaving an unlabelled
+            # conflict PR that looks like a clean one.
+            PR_URL=$(gh pr create --base main --head "${BRANCH}" \
               --title "rebase: upstream ${LATEST} (manual rebase required)" \
-              --body "${BODY}" \
-              --label needs-human \
-              --label "conflict:upstream-refactor"
+              --body "${BODY}")
+            echo "opened ${PR_URL}"
+            # Labels are applied AFTER the PR exists and never fail the run.
+            # Doing it inline via `gh pr create --label` is what lost three
+            # upstream releases: the label did not exist, the whole command
+            # exited 1, and no PR was created even though the branch was pushed.
+            gh pr edit "${PR_URL}" --add-label needs-human \
+              --add-label "conflict:upstream-refactor" || true
           fi
