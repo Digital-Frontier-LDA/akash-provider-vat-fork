@@ -18,12 +18,18 @@ on:
         required: true
         type: string
 
+# Default every job to read-only; the build job re-declares what it actually
+# needs. Without a top-level block the default for jobs that don't declare one
+# is the repo-wide setting, which is not necessarily read-only.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: write   # pushes the fork image to GHCR
     env:
       RELEASE_DOCKER_IMAGE: ghcr.io/digital-frontier-lda/akash-provider-vat-fork
     steps:
