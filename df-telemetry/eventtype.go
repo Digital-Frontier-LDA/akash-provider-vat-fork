@@ -44,7 +44,12 @@ func EventTypeForRoute(method, path string) string {
 		return eventLeaseLogsConnection
 	case strings.HasSuffix(p, "/kubeevents"):
 		return eventLeaseKubeEvents
-	case strings.HasSuffix(p, "/attestation/quote"):
+	// Gated on POST like the manifest cases: upstream registers this route
+	// Methods(http.MethodPost) only, and EventTypeForMuxRoute falls back to the
+	// RAW URL path when no mux route matched — so without the method check any
+	// unmatched request whose path merely ends in /attestation/quote would be
+	// recorded as a genuine attestation event.
+	case strings.HasSuffix(p, "/attestation/quote") && method == http.MethodPost:
 		return eventLeaseAttestationQuote
 	case strings.HasSuffix(p, "/service/{servicename}/status"):
 		return eventLeaseServiceStatus

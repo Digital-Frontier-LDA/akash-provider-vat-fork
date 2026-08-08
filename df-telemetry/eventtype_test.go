@@ -22,6 +22,11 @@ func TestEventType_MapsControlPlaneRoutes(t *testing.T) {
 		{"lease status", http.MethodGet, "/lease/{dseq}/{gseq}/{oseq}/status", eventLeaseStatusCheck},
 		{"lease kubeevents", http.MethodGet, "/lease/{dseq}/{gseq}/{oseq}/kubeevents", eventLeaseKubeEvents},
 		{"lease attestation quote", http.MethodPost, "/lease/{dseq}/{gseq}/{oseq}/attestation/quote", eventLeaseAttestationQuote},
+		// Method-gated: EventTypeForMuxRoute falls back to the raw URL path when no
+		// mux route matched, so a non-POST path ending in /attestation/quote must
+		// NOT be recorded as a genuine attestation event.
+		{"attestation quote, wrong method", http.MethodGet, "/lease/{dseq}/{gseq}/{oseq}/attestation/quote", eventOther},
+		{"attestation quote, unmatched raw path", http.MethodGet, "/anything/attestation/quote", eventOther},
 		{"unknown route", http.MethodGet, "/some/workload/path", eventOther},
 		{"version", http.MethodGet, "/version", eventOther},
 	}
