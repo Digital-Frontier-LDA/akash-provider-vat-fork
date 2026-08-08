@@ -18,7 +18,12 @@ const (
 	eventManifestGet          = "manifest_get"
 	eventLeaseKubeEvents      = "lease_kube_events"
 	eventLeaseServiceStatus   = "lease_service_status"
-	eventOther                = "other"
+	// Added upstream in v0.16.x (AEP-86 confidential compute): an operator asks
+	// the provider for a TEE attestation quote for a lease. Control-plane, and
+	// it carries PermissionScopeAttestation, so it only reaches the hook on an
+	// authenticated request — worth its own type rather than falling to "other".
+	eventLeaseAttestationQuote = "lease_attestation_quote"
+	eventOther                 = "other"
 )
 
 // EventTypeForRoute maps a matched route template + HTTP method to a spec §21
@@ -39,6 +44,8 @@ func EventTypeForRoute(method, path string) string {
 		return eventLeaseLogsConnection
 	case strings.HasSuffix(p, "/kubeevents"):
 		return eventLeaseKubeEvents
+	case strings.HasSuffix(p, "/attestation/quote"):
+		return eventLeaseAttestationQuote
 	case strings.HasSuffix(p, "/service/{servicename}/status"):
 		return eventLeaseServiceStatus
 	case strings.HasSuffix(p, "/status"):
