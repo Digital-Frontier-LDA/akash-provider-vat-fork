@@ -658,7 +658,18 @@ loop:
 					}
 
 					allocatedPrev := res.allocated
-					res.allocated = ev.Status == event.ClusterDeploymentDeployed
+
+					// ClusterDeploymentUpdated means the deployment still exists and is
+					// deployed - it must never clear the allocation. Treating it as
+					// "not deployed" parked the reservation in pending permanently: the
+					// monitor only publishes on a status *change*, and a healthy deployment
+					// never leaves Deployed, so nothing re-emitted Deployed to undo it.
+					// The reservation's resources were then counted twice - once as running
+					// pods, once as a still-held reservation - shrinking advertised capacity
+					// on every deploy/update until the provider was restarted.
+					if ev.Status != event.ClusterDeploymentUpdated {
+						res.allocated = ev.Status == event.ClusterDeploymentDeployed
+					}
 
 					if res.allocated != allocatedPrev {
 						externalPortCount := reservationCountEndpoints(res)
