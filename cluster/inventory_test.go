@@ -881,3 +881,112 @@ func TestPlacementRequirementsPreserved(t *testing.T) {
 		require.Empty(t, placementRequirements(nil).Attributes)
 	})
 }
+
+func TestInventory_ClusterDeploymentUpdatedKeepsReservationAllocated(t *testing.T) {
+	// Regression: an Updated event must not un-allocate a deployed reservation.
+	// The monitor publishes only on status *change*, so once a healthy deployment
+	// settles on Deployed it never re-emits it. Clearing `allocated` here left the
+	// reservation stuck in Pending, double-counting its resources against node
+	// capacity on every deploy/update until the provider was restarted.
+	lid := testutil.LeaseID(t)
+	config := Config{
+		InventoryResourcePollPeriod:     time.Second,
+		InventoryResourceDebugFrequency: 1,
+		InventoryExternalPortQuantity:   1000,
+	}
+	myLog := testutil.Logger(t)
+	bus := pubsub.NewBus()
+	subscriber, err := bus.Subscribe()
+	require.NoError(t, err)
+
+	deployments := make([]ctypes.IDeployment, 1)
+	deployment := &cmockstypes.IDeployment{}
+	deployment.On("LeaseID").Return(lid)
+
+	serviceEndpoints := make(rtypes.Endpoints, 1)
+	serviceEndpoints[0].Kind = rtypes.Endpoint_RANDOM_PORT
+
+	groupServices := make(manifest.Services, 1)
+	groupServices[0] = manifest.Service{
+		Count: 1,
+		Resources: rtypes.Resources{
+			ID:     1,
+			CPU:    &rtypes.CPU{Units: rtypes.NewResourceValue(1)},
+			GPU:    &rtypes.GPU{Units: rtypes.NewResourceValue(0)},
+			Memory: &rtypes.Memory{Quantity: rtypes.NewResourceValue(1 * unit.Gi)},
+			Storage: []rtypes.Storage{
+				{
+					Name:     "default",
+					Quantity: rtypes.NewResourceValue(1 * unit.Gi),
+				},
+			},
+			Endpoints: serviceEndpoints,
+		},
+	}
+	group := manifest.Group{
+		Name:     "nameForGroup",
+		Services: groupServices,
+	}
+
+	deployment.On("ManifestGroup").Return(&group)
+	deployment.On("ClusterParams").Return(crd.ClusterSettings{})
+
+	deployments[0] = deployment
+
+	clusterClient := &cmocks.Client{}
+
+	kc := kfake.NewClientset()
+	ac := afake.NewClientset()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = context.WithValue(ctx, fromctx.CtxKeyPubSub, tpubsub.New(ctx, 1000))
+	ctx = context.WithValue(ctx, fromctx.CtxKeyKubeClientSet, kubernetes.Interface(kc))
+	ctx = context.WithValue(ctx, fromctx.CtxKeyAkashClientSet, aclient.Interface(ac))
+	ctx = context.WithValue(ctx, cfromctx.CtxKeyClientInventory, cinventory.NewNull(ctx, "nodeA"))
+
+	inv, err := newInventoryService(
+		ctx,
+		config,
+		myLog,
+		subscriber,
+		clusterClient,
+		waiter.NewNullWaiter(),
+		deployments)
+	require.NoError(t, err)
+	require.NotNil(t, inv)
+
+	mkEvent := func(status event.ClusterDeploymentStatus) event.ClusterDeployment {
+		return event.ClusterDeployment{
+			LeaseID: lid,
+			Group: &manifest.Group{
+				Name:     "nameForGroup",
+				Services: nil,
+			},
+			Status: status,
+		}
+	}
+
+	allocated := func() bool {
+		// bounded so a wedged inventory goroutine fails the test instead of hanging it
+		sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scancel()
+		status, err := inv.status(sctx)
+		if err != nil {
+			return false
+		}
+		return len(status.Active) == 1 && len(status.Pending) == 0
+	}
+
+	require.NoError(t, bus.Publish(mkEvent(event.ClusterDeploymentDeployed)))
+	require.Eventually(t, allocated, 10*time.Second, time.Second/4,
+		"reservation should be allocated after a Deployed event")
+
+	// Updating a live deployment must leave the reservation allocated. Before the
+	// fix this flipped it back to pending, permanently.
+	require.NoError(t, bus.Publish(mkEvent(event.ClusterDeploymentUpdated)))
+	require.Never(t, func() bool { return !allocated() }, 3*time.Second, time.Second/4,
+		"an Updated event must not un-allocate a deployed reservation")
+
+	cancel()
+	<-inv.lc.Done()
+}

@@ -658,7 +658,20 @@ loop:
 					}
 
 					allocatedPrev := res.allocated
-					res.allocated = ev.Status == event.ClusterDeploymentDeployed
+
+					// Updated means "updated but may not be functional" (see
+					// event.ClusterDeploymentUpdated) - it carries no verdict on health, so
+					// it must be allocation-neutral. Deriving allocated from it cleared the
+					// flag on every deploy/update, and because the monitor publishes only on
+					// a status *change* - and a healthy deployment never leaves Deployed -
+					// nothing ever set it back. The reservation stayed pending for the life
+					// of the process and its resources were counted twice (running pods plus
+					// a still-held reservation), shrinking advertised capacity until the
+					// provider was restarted. Real health transitions still arrive from the
+					// monitor as Deployed/Pending, which is what should move this flag.
+					if ev.Status != event.ClusterDeploymentUpdated {
+						res.allocated = ev.Status == event.ClusterDeploymentDeployed
+					}
 
 					if res.allocated != allocatedPrev {
 						externalPortCount := reservationCountEndpoints(res)
