@@ -158,6 +158,30 @@ func newInventoryService(
 		res.SetClusterParams(d.ClusterParams())
 		res.teeType = teeTypeFromClusterParams(d.ClusterParams())
 
+		// These deployments are already running in the cluster - that is where
+		// this slice comes from - so their resources are already reflected in the
+		// node metrics the inventory reports. They must therefore start allocated:
+		// a pending reservation is subtracted from availability a second time,
+		// double-counting every existing lease from the moment the provider boots.
+		//
+		// Nothing reliably corrects this afterwards. The run loop only begins
+		// consuming ClusterDeployment events once waiter.WaitForAll returns, so
+		// statuses published during operator startup are missed, and the monitor
+		// re-publishes only on a *change* - a healthy deployment never leaves
+		// Deployed, so it never re-emits one.
+		res.allocated = true
+
+		// Mirror the accounting the allocated transition would have done.
+		// unreserve reclaims these for allocated reservations, so skipping it
+		// here would leak external ports on every restart.
+		if n := reservationCountEndpoints(res); n <= is.availableExternalPorts {
+			is.availableExternalPorts -= n
+		} else {
+			is.log.Error("external port accounting underflow at startup",
+				"order", res.OrderID(), "need", n, "available", is.availableExternalPorts)
+			is.availableExternalPorts = 0
+		}
+
 		reservations = append(reservations, res)
 	}
 
