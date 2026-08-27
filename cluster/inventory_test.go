@@ -967,7 +967,10 @@ func TestInventory_ClusterDeploymentUpdatedKeepsReservationAllocated(t *testing.
 	}
 
 	allocated := func() bool {
-		status, err := inv.status(context.Background())
+		// bounded so a wedged inventory goroutine fails the test instead of hanging it
+		sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scancel()
+		status, err := inv.status(sctx)
 		if err != nil {
 			return false
 		}

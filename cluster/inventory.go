@@ -659,14 +659,16 @@ loop:
 
 					allocatedPrev := res.allocated
 
-					// ClusterDeploymentUpdated means the deployment still exists and is
-					// deployed - it must never clear the allocation. Treating it as
-					// "not deployed" parked the reservation in pending permanently: the
-					// monitor only publishes on a status *change*, and a healthy deployment
-					// never leaves Deployed, so nothing re-emitted Deployed to undo it.
-					// The reservation's resources were then counted twice - once as running
-					// pods, once as a still-held reservation - shrinking advertised capacity
-					// on every deploy/update until the provider was restarted.
+					// Updated means "updated but may not be functional" (see
+					// event.ClusterDeploymentUpdated) - it carries no verdict on health, so
+					// it must be allocation-neutral. Deriving allocated from it cleared the
+					// flag on every deploy/update, and because the monitor publishes only on
+					// a status *change* - and a healthy deployment never leaves Deployed -
+					// nothing ever set it back. The reservation stayed pending for the life
+					// of the process and its resources were counted twice (running pods plus
+					// a still-held reservation), shrinking advertised capacity until the
+					// provider was restarted. Real health transitions still arrive from the
+					// monitor as Deployed/Pending, which is what should move this flag.
 					if ev.Status != event.ClusterDeploymentUpdated {
 						res.allocated = ev.Status == event.ClusterDeploymentDeployed
 					}
