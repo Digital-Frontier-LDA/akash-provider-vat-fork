@@ -27,7 +27,7 @@ jobs:
       - name: Ensure GOPATH dirs
         run: mkdir -p ${{ env.GOPATH }}/{src,bin,pkg}
       - name: Checkout codebase
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           set-safe-directory: true
@@ -43,7 +43,7 @@ jobs:
         run: |
           toolchain=$(./script/tools.sh gotoolchain | sed 's/go*//')
           echo "GOVERSION=${toolchain}" >> $GITHUB_ENV
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "${{ env.GOVERSION }}"
       - name: Install tools
@@ -59,7 +59,7 @@ jobs:
         run: |
           AKASH_API_VERSION=$(go list -mod=readonly -m -f '{{ .Version }}' pkg.akt.dev/go)
           echo "AKASH_API_VERSION=$AKASH_API_VERSION" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: "akash-network/chain-sdk"
           fetch-depth: 0
@@ -77,7 +77,7 @@ jobs:
         run: |
           make modvendor
           cat "$GITHUB_WORKSPACE/env.backup" > "$GITHUB_ENV"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
           cache: 'pip'
@@ -89,9 +89,9 @@ jobs:
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
         run: echo "KIND_VERSION=$(go list -mod=readonly -m -f '{{ .Version }}' sigs.k8s.io/kind)" >> $GITHUB_ENV
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Go mod tidy
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
         run: go mod tidy
@@ -99,7 +99,7 @@ jobs:
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
         run: make chmod-akash-scripts
       - name: Setup kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           version: "${{ env.KIND_VERSION }}"
           node_image: "kindest/node:${{ env.KINDEST_VERSION }}"

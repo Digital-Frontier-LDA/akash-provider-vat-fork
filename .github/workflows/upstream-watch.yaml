@@ -1,0 +1,226 @@
+# Digital Frontier VAT fork — upstream release watcher.
+#
+# Runs daily, compares the latest akash-network/provider release tag against the
+# UPSTREAM_TAG pin, and opens a rebase PR when a newer release exists. The fork
+# must stay tiny against upstream's ~3-week cadence (docs/fork-automation.md);
+# this workflow is the "fully automatable" half. The auto-merge.yaml workflow
+# decides whether the resulting PR may merge unattended.
+#
+# "Rebase" here means replaying the fork delta (${UPSTREAM_TAG}..main, ~42 files,
+# only 2 of them upstream-tracked) onto the new upstream tag — NOT `git rebase`
+# of main. main's history cannot be replayed: each upstream adoption lands as a
+# single squash commit carrying a whole upstream version jump.
+#
+# Silent-failure history worth keeping in mind when changing this file: between
+# 2026-07-28 and 2026-08-07 it detected v0.16.0, v0.16.1 and v0.16.2, pushed a
+# branch for each, and opened NO PR for any of them — `gh pr create --label
+# needs-human` failed because that label did not exist in the repo, and the next
+# day's run saw the orphan branch and exited 0. Two invariants came out of that:
+# idempotency keys on the PR (never the branch), and no label operation is ever
+# allowed to fail the run.
+#
+# This workflow does NOT bump UPSTREAM_TAG — the rebase PR's own diff carries
+# the UPSTREAM_TAG bump, so the pin only advances when the PR actually merges.
+#
+# Auth: this workflow creates the branch + PR with a fine-grained PAT
+# (secret REBASE_PAT), not the default GITHUB_TOKEN. Two reasons:
+#  (1) the Digital-Frontier-LDA org disallows Actions creating PRs with
+#      GITHUB_TOKEN; (2) a PR opened by GITHUB_TOKEN does not trigger
+#      pull_request workflows (GitHub's recursion guard) — so ci.yaml and
+#      auto-merge.yaml would never run on the rebase PR. The PAT fixes both.
+# REBASE_PAT must be a fine-grained PAT scoped to this repo with
+# Contents: read/write + Pull requests: read/write + Workflows: read/write.
+# Workflows is REQUIRED, not optional: rebasing onto a new upstream release
+# carries upstream's own .github/workflows/* changes, and GitHub refuses to let a
+# token without the Workflows permission push workflow-file edits — the rebase
+# branch push fails with "refusing to allow a Personal Access Token to create or
+# update workflow `.github/workflows/...` without `workflow` scope" and the run
+# dies before opening the PR. (Hit on the v0.12.0 -> v0.14.0 rebase 2026-06-12,
+# which had to be completed manually with a workflow-scoped token.)
+name: upstream-watch
+
+on:
+  schedule:
+    # Daily at 06:00 UTC.
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+# Least privilege: every write operation (branch push, PR creation) uses the
+# REBASE_PAT, so the default GITHUB_TOKEN needs no write scopes — keeping it
+# read-only limits blast radius if a step or action is ever compromised.
+permissions:
+  contents: read
+
+jobs:
+  detect-and-open-rebase-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preflight — REBASE_PAT must be configured
+        # Fail fast with a clear message rather than letting checkout/git fail
+        # later with an opaque auth error when the secret is unset.
+        env:
+          REBASE_PAT: ${{ secrets.REBASE_PAT }}
+        run: |
+          if [ -z "${REBASE_PAT}" ]; then
+            echo "::error::REBASE_PAT secret is not set. upstream-watch needs a"
+            echo "::error::fine-grained PAT (Contents + Pull requests: read/write"
+            echo "::error::on this repo) stored as the REBASE_PAT repository secret."
+            exit 1
+          fi
+          echo "REBASE_PAT is configured."
+
+      - name: Checkout fork (full history — a rebase needs it)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          # PAT so the pushed branch + PR are attributed to the PAT identity —
+          # required for the rebase PR to trigger ci.yaml / auto-merge.yaml.
+          token: ${{ secrets.REBASE_PAT }}
+
+      - name: Detect new upstream release and open a rebase PR
+        env:
+          GH_TOKEN: ${{ secrets.REBASE_PAT }}
+          # This repo is a GitHub FORK of akash-network/provider. Without this,
+          # `gh pr create` / `gh pr list` default the base to the PARENT repo
+          # (akash-network/provider), so PR creation fails with "Resource not
+          # accessible by personal access token (createPullRequest)" — the PAT has
+          # no access to upstream. Pin gh to THIS repo so the rebase PR is opened
+          # within the fork (base = this repo's main). `gh api` calls with explicit
+          # paths (repos/akash-network/provider/...) are unaffected.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          LATEST=$(gh api repos/akash-network/provider/releases/latest --jq .tag_name)
+          CURRENT=$(cat UPSTREAM_TAG)
+          echo "upstream latest release: ${LATEST}"
+          echo "fork is pinned at:       ${CURRENT}"
+
+          if [ "${LATEST}" = "${CURRENT}" ]; then
+            echo "Fork is up to date — nothing to do."
+            exit 0
+          fi
+
+          BRANCH="rebase/${LATEST}"
+
+          # Idempotency keys on the PR, NOT on the branch. Keying on the branch
+          # wedges the watcher permanently: the branch is pushed BEFORE
+          # `gh pr create` runs, so any failure after the push (a missing label
+          # once cost us v0.16.0, v0.16.1 and v0.16.2) leaves an orphan branch
+          # that makes every subsequent run exit 0 with "already exists" — a
+          # green run that silently drops the release. An orphan branch is now
+          # force-updated and the PR opened.
+          # --state all, not open: a CLOSED rebase PR is a human decision to
+          # skip that release, and re-opening it every morning would be spam.
+          # A merged PR needs no special case — it advances UPSTREAM_TAG, so the
+          # equality check above already exits first.
+          #
+          # Consequence, deliberate: once a PR exists for this tag in ANY state,
+          # the watcher will never recreate it. A closed one permanently
+          # suppresses automatic retries for that release — neither reopening it
+          # nor deleting the branch brings the watcher back, because a closed PR
+          # still matches here. Picking that release back up is a manual job:
+          # push the branch and reopen the PR yourself.
+          if [ -n "$(gh pr list --head "${BRANCH}" --state all --json number --jq '.[].number')" ]; then
+            echo "A rebase PR for ${BRANCH} already exists (any state) — nothing to do."
+            exit 0
+          fi
+          if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            echo "Branch ${BRANCH} exists with no PR — orphaned by an earlier failed run. Rebuilding it."
+          fi
+
+          # The labels the conflict path applies must exist before it applies
+          # them: `gh pr create --label <missing>` fails the whole command AFTER
+          # the branch push, which is exactly how the v0.16.x releases were lost.
+          # Creating them here is idempotent and keeps the workflow independent
+          # of manual repo state.
+          gh label create needs-human --color d93f0b \
+            --description "Automated handling gave up — a human must take this" || true
+          gh label create "conflict:upstream-refactor" --color b60205 \
+            --description "Upstream refactored the code our patch attaches to" || true
+          gh label create "conflict:our-hook" --color b60205 \
+            --description "The rebase modified df-telemetry/ — tree-hash guard tripped" || true
+
+          git config user.name  "df-upstream-watch[bot]"
+          git config user.email "df-upstream-watch@users.noreply.github.com"
+
+          git remote add upstream https://github.com/akash-network/provider.git || true
+          git fetch upstream --tags --quiet
+
+          # Replay the fork delta onto the new upstream tag, rather than
+          # rebasing main onto it. `main` cannot be rebased: each upstream
+          # adoption lands as a SQUASH merge (e.g. 46512f8 for v0.14.2), so
+          # replaying main's history re-applies an entire upstream version jump
+          # as one commit and conflicts against every later release — the reason
+          # every v0.16.x run reported "hit conflicts". The fork delta is
+          # `${CURRENT}..main` restricted to our own files, which is small (~42
+          # files, 2 of them upstream-tracked), and a 3-way apply onto
+          # ${LATEST} is the operation a rebase was only ever approximating.
+          # Anchor the delta's endpoint to origin/main by SHA. NOT `HEAD`: on
+          # workflow_dispatch actions/checkout checks out whatever ref was
+          # dispatched, so HEAD can be some feature branch and the PR would
+          # carry that branch's delta while claiming to be a main rebase. The
+          # PR's base is main, so main is the only correct endpoint.
+          git fetch origin main --quiet
+          FORK_HEAD=$(git rev-parse origin/main)
+          echo "fork delta endpoint: origin/main = ${FORK_HEAD}"
+          git checkout -b "${BRANCH}" "${LATEST}"
+
+          REBASE_STATUS="clean"
+          git diff "${CURRENT}" "${FORK_HEAD}" --output=/tmp/fork-delta.patch
+          if git apply -3 --whitespace=nowarn /tmp/fork-delta.patch; then
+            git add -A
+          else
+            REBASE_STATUS="conflicts"
+            echo "Replaying the fork delta onto ${LATEST} hit conflicts — opening a PR that flags a manual rebase."
+            # Keep the conflict markers in the branch so the human sees exactly
+            # where upstream moved under our patch, rather than an empty diff.
+            git add -A || true
+          fi
+
+          # Advance the pin in the branch so the PR's diff carries the
+          # UPSTREAM_TAG bump. Without it the merged PR leaves UPSTREAM_TAG
+          # stale and the next run re-adopts the SAME release forever. Done in
+          # both cases now: the conflict PR is a real branch a human finishes in
+          # place, so it should already carry the pin it is moving to.
+          printf '%s\n' "${LATEST}" > UPSTREAM_TAG
+          git add UPSTREAM_TAG
+          git commit -m "rebase: adopt upstream ${LATEST} into main"
+
+          # --force only ever rewrites an ORPHAN branch: the PR check above
+          # already exited when any PR (open, closed or merged) exists for this
+          # head, so there is no review in progress to clobber.
+          git push --force origin "${BRANCH}"
+
+          NOTES=$(gh api "repos/akash-network/provider/releases/tags/${LATEST}" --jq .body || echo "(release notes unavailable)")
+
+          if [ "${REBASE_STATUS}" = "clean" ]; then
+            BODY=$(printf '%s\n\n%s\n\n%s\n' \
+              "Automated rebase onto upstream akash-network/provider \`${LATEST}\`." \
+              "The \`df-telemetry/\` tree-hash guard and \`ci.yaml\` checks gate whether this merges unattended (see auto-merge.yaml). This PR also bumps \`UPSTREAM_TAG\`." \
+              "### Upstream release notes (${LATEST})
+          ${NOTES}")
+            gh pr create --base main --head "${BRANCH}" \
+              --title "rebase: upstream ${LATEST}" \
+              --body "${BODY}"
+          else
+            BODY=$(printf '%s\n\n%s\n\n%s\n' \
+              "Upstream akash-network/provider released \`${LATEST}\`, but the automatic rebase hit conflicts — a manual rebase is required." \
+              "Resolve conflicts locally, then update \`UPSTREAM_TAG\` to \`${LATEST}\` in this branch." \
+              "### Upstream release notes (${LATEST})
+          ${NOTES}")
+            # Capture the URL gh prints, and edit by URL rather than by branch
+            # name: branch-name resolution is ambiguous in a fork, and the
+            # `|| true` below would swallow the miss, leaving an unlabelled
+            # conflict PR that looks like a clean one.
+            PR_URL=$(gh pr create --base main --head "${BRANCH}" \
+              --title "rebase: upstream ${LATEST} (manual rebase required)" \
+              --body "${BODY}")
+            echo "opened ${PR_URL}"
+            # Labels are applied AFTER the PR exists and never fail the run.
+            # Doing it inline via `gh pr create --label` is what lost three
+            # upstream releases: the label did not exist, the whole command
+            # exited 1, and no PR was created even though the branch was pushed.
+            gh pr edit "${PR_URL}" --add-label needs-human \
+              --add-label "conflict:upstream-refactor" || true
+          fi

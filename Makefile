@@ -52,6 +52,17 @@ ldflags := -X github.com/akash-network/provider/version.Name=provider-services \
 -X github.com/akash-network/provider/version.Version=$(RELEASE_TAG) \
 -X github.com/akash-network/provider/version.Commit=$(GIT_HEAD_COMMIT_LONG)
 
+# Digital Frontier VAT telemetry — build-time injection of the commit/version
+# fields every emitted event carries (OBS-04, RESEARCH Pitfall 6). Mirrors the
+# upstream version -X pattern above. DF_PKG is the fork module path + /df-telemetry.
+DF_PKG                 := $(shell head -1 go.mod | awk '{print $$2}')/df-telemetry
+DF_UPSTREAM_TAG        := $(shell cat UPSTREAM_TAG)
+GO_LDFLAGS_DF          := \
+-X '$(DF_PKG).Commit=$(GIT_HEAD_COMMIT_SHORT)' \
+-X '$(DF_PKG).UpstreamCommit=$(shell git rev-parse --short df-base/$(DF_UPSTREAM_TAG) 2>/dev/null)' \
+-X '$(DF_PKG).UpstreamVersion=$(DF_UPSTREAM_TAG)'
+ldflags += $(GO_LDFLAGS_DF)
+
 GORELEASER_LDFLAGS := $(ldflags)
 
 ldflags += -linkmode=external
