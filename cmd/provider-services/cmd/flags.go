@@ -201,6 +201,11 @@ func addRunFlags(cmd *cobra.Command) error {
 		return err
 	}
 
+	cmd.Flags().Bool(FlagPprofEnabled, false, "serve net/http/pprof under /debug/pprof on the metrics listener (requires --metrics-listener)")
+	if err := viper.BindPFlag(FlagPprofEnabled, cmd.Flags().Lookup(FlagPprofEnabled)); err != nil {
+		return err
+	}
+
 	cmd.Flags().Duration(FlagWithdrawalPeriod, time.Hour*24, "period at which withdrawals are made from the escrow accounts")
 	if err := viper.BindPFlag(FlagWithdrawalPeriod, cmd.Flags().Lookup(FlagWithdrawalPeriod)); err != nil {
 		return err
