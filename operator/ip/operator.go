@@ -435,6 +435,10 @@ func (op *ipOperator) prepareState(pd common.PreparedResult) error {
 
 func handleHTTPError(op *ipOperator, rw http.ResponseWriter, req *http.Request, err error, status int) {
 	op.log.Error("http request processing failed", "method", req.Method, "path", req.URL.Path, "err", err)
+	// Headers are frozen by WriteHeader. Without an explicit type here the body
+	// is sniffed as text/plain, so the client never decodes it and reports
+	// "unspecified error" instead of the operator's actual message.
+	rw.Header().Set("Content-Type", "application/json")
 	rw.WriteHeader(status)
 
 	body := ipoptypes.IPOperatorErrorResponse{

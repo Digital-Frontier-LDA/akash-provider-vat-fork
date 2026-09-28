@@ -50,6 +50,13 @@ var (
 	errInsufficientIPs          = fmt.Errorf("%w: insufficient number of IPs", errInventoryReservation)
 
 	inventoryStatusQuantityZero = resource.NewQuantity(0, resource.DecimalSI)
+
+	// ipCheckTimeout bounds one runCheck pass. Reservations are not processed
+	// while a pass is in flight (updateIPs sets reservech to nil until runch
+	// delivers), and the run loop's context is never cancelled, so without a
+	// bound a single stuck IP operator request stops all bidding for the life
+	// of the process. A var so tests can shorten it.
+	ipCheckTimeout = 30 * time.Second
 )
 
 var (
@@ -908,6 +915,9 @@ func (is *inventoryService) runCheck(ctx context.Context, state *inventoryServic
 	}
 
 	return runner.Do(func() runner.Result {
+		ctx, cancel := context.WithTimeout(ctx, ipCheckTimeout)
+		defer cancel()
+
 		retval := runCheckResult{}
 		var err error
 
