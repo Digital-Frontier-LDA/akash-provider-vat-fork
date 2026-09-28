@@ -134,6 +134,7 @@ func (c *client) GetIPAddressUsage(ctx context.Context) (uint, uint, error) {
 	if err != nil {
 		return math.MaxUint32, math.MaxUint32, err
 	}
+	defer clusterutil.DrainAndClose(response.Body)
 
 	if response.StatusCode != http.StatusOK {
 		buf := &bytes.Buffer{}
