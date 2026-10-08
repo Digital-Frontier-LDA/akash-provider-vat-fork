@@ -13,6 +13,8 @@ import (
 	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 )
 
+const ownedBuilderTestPullSecret = "owned-builder-readonly"
+
 func ownedBuilderFixture() *Workload {
 	image := "ghcr.io/digital-frontier-lda/df-akash-builder@sha256:" + strings.Repeat("a", 64)
 	group := &mani.Group{Services: []mani.Service{{
@@ -110,9 +112,9 @@ func TestOwnedBuilderSettingsRequireFixedImmutablePackage(t *testing.T) {
 
 func TestOwnedBuilderPullSecretIsLimitedToExactContract(t *testing.T) {
 	b := ownedBuilderFixture()
-	b.settings.OwnedBuilderImagePullSecretName = "owned-builder-readonly"
+	b.settings.OwnedBuilderImagePullSecretName = ownedBuilderTestPullSecret
 	b.settings.DockerImagePullSecretsName = "legacy-global"
-	require.Equal(t, []corev1.LocalObjectReference{{Name: "owned-builder-readonly"}}, b.imagePullSecrets())
+	require.Equal(t, []corev1.LocalObjectReference{{Name: ownedBuilderTestPullSecret}}, b.imagePullSecrets())
 	require.Empty(t, b.container().VolumeMounts)
 	require.False(t, *b.automountServiceAccountToken())
 	for _, change := range []func(*Workload){
@@ -123,20 +125,20 @@ func TestOwnedBuilderPullSecretIsLimitedToExactContract(t *testing.T) {
 		func(b *Workload) { b.group.Services[0].Env = append(b.group.Services[0].Env, "GITHUB_TOKEN=inert") },
 	} {
 		b := ownedBuilderFixture()
-		b.settings.OwnedBuilderImagePullSecretName = "owned-builder-readonly"
+		b.settings.OwnedBuilderImagePullSecretName = ownedBuilderTestPullSecret
 		b.settings.DockerImagePullSecretsName = "legacy-global"
 		change(b)
 		require.Equal(t, []corev1.LocalObjectReference{{Name: "legacy-global"}}, b.imagePullSecrets())
 		require.False(t, *b.container().SecurityContext.AllowPrivilegeEscalation)
 	}
 	b.group.Services[0].Credentials = &mani.ImageCredentials{Host: "ghcr.io", Username: "inert", Password: "inert"}
-	require.NotEqual(t, []corev1.LocalObjectReference{{Name: "owned-builder-readonly"}}, b.imagePullSecrets())
+	require.NotEqual(t, []corev1.LocalObjectReference{{Name: ownedBuilderTestPullSecret}}, b.imagePullSecrets())
 	require.False(t, *b.container().SecurityContext.AllowPrivilegeEscalation)
 }
 
 func TestOwnedBuilderPullSecretValidation(t *testing.T) {
 	valid := ownedBuilderFixture().settings
-	valid.OwnedBuilderImagePullSecretName = "owned-builder-readonly"
+	valid.OwnedBuilderImagePullSecretName = ownedBuilderTestPullSecret
 	require.NoError(t, ValidateSettings(valid))
 	for _, name := range []string{"UPPER", "../other", "space value", "-prefix", "suffix-", strings.Repeat("a", 64)} {
 		changed := valid

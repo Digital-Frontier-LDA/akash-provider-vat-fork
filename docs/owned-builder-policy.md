@@ -115,3 +115,9 @@ Both fields remain default-off; no production provider settings are changed here
 Dependabot uses the supported `.github/dependabot.yaml` spelling, preserving its
 content and schedules while satisfying the unchanged YAML-extension policy.
 See https://docs.github.com/en/code-security/concepts/supply-chain-security/about-the-dependabot-yml-file.
+
+The original whole-repository `make lint` currently reports pre-existing findings
+with a zero issues exit code. It remains intact, and an additional PR/main step
+fails on findings introduced relative to the exact verified base commit. Its
+comparison uses full Git history and the same repository linter/configuration.
+This prevents a new finding from being hidden by the original report-only mode.

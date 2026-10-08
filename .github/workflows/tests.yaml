@@ -55,10 +55,23 @@ jobs:
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
       - name: Run linter
         run: make lint
+
+      - name: Reject lint findings introduced by this source
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+        env:
+          LINT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$LINT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$LINT_BASE_SHA^{commit}"
+          .cache/bin/golangci-lint run ./... --new-from-rev="$LINT_BASE_SHA" --issues-exit-code=1 --timeout=20m
 
   release-dry-run:
     runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'core-e2e' }}
