@@ -48,7 +48,8 @@ jobs:
           go-version: "${{ env.GOVERSION }}"
       - name: Install tools
         run: |
-          curl -sfL https://direnv.net/install.sh | bash
+          # Install dependencies already installs direnv from Ubuntu packages.
+          direnv --version
           go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
       - name: Hook direnv to bash
         run: |
