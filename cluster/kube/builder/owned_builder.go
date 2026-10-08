@@ -10,6 +10,8 @@ import (
 const ownedBuilderOwner = "akash14n4rkmz64rn0tey0r5g07l8q5x0fh2h4hu44kt"
 const ownedBuilderService = "owned-buildkit"
 
+var ownedBuilderPullSecretPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
 var ownedBuilderImagePattern = regexp.MustCompile(`^ghcr\.io/digital-frontier-lda/df-akash-builder@sha256:[0-9a-f]{64}$`)
 
 // isOwnedBuilder grants only the operator-approved immutable setup contract.

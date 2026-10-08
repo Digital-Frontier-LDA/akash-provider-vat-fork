@@ -185,6 +185,11 @@ func addRunFlags(cmd *cobra.Command) error {
 		return err
 	}
 
+	cmd.Flags().String(FlagOwnedBuilderImagePullSecretName, "", "operator-created read-only registry secret in the lease namespace; referenced only by the exact owned builder")
+	if err := viper.BindPFlag(FlagOwnedBuilderImagePullSecretName, cmd.Flags().Lookup(FlagOwnedBuilderImagePullSecretName)); err != nil {
+		return err
+	}
+
 	cmd.Flags().Duration(FlagBidTimeout, 5*time.Minute, "time after which bids are cancelled if no lease is created")
 	if err := viper.BindPFlag(FlagBidTimeout, cmd.Flags().Lookup(FlagBidTimeout)); err != nil {
 		return err

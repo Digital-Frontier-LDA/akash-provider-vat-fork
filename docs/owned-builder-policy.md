@@ -87,8 +87,31 @@ Do not expose publication authority until its subsequent qualification passes.
 Pull requests run the original build, full tests, recovery-upgrade test, lint,
 release dry-run, coverage, YAML policy and CRD integration jobs on isolated
 Ubuntu 24.04 hosted runners. Main and tag routes retain their existing runner
-labels. Coverage is generated in its own fresh job before the original upload;
+labels. Complete coverage is generated against the fresh integration cluster and passed
+through an exact-run/attempt/source-checked artifact to the original Codecov job;
 it no longer assumes a persistent runner already has another job's output.
 The builder policy workflow uses the repository-required `.yaml` suffix, so the
 unchanged YAML-extension check includes it without an exception. All original
 commands and result gates remain; provider integration must pass before merge.
+
+## Dedicated private-image pull path
+
+The operator-only `--owned-builder-image-pull-secret-name` optionally references
+one dedicated read-only registry secret already provisioned in the exact lease
+namespace. The name is a bounded DNS label and requires the immutable builder
+image setting. Only a workload satisfying the complete fixed owner/image/service/
+TLS/one-replica/no-overrides contract receives this reference. Foreign owners,
+runner services, alternate images and tenant credentials retain their original
+pull behavior and receive no setup exception. The secret is never mounted and
+no service-account token is exposed. The global pull-secret option is unchanged.
+
+This code does not provision, copy, log or grant registry credentials. Before live
+qualification, use a dedicated read-only package credential, verify namespace
+owner/dseq/gseq/oseq/provider labels, provision it solely in that owned lease
+namespace and confirm image pull. Never substitute an operator write-capable PAT.
+Keep both new flags unset until the full provider checks and operator review pass.
+Both fields remain default-off; no production provider settings are changed here.
+
+Dependabot uses the supported `.github/dependabot.yaml` spelling, preserving its
+content and schedules while satisfying the unchanged YAML-extension policy.
+See https://docs.github.com/en/code-security/concepts/supply-chain-security/about-the-dependabot-yml-file.

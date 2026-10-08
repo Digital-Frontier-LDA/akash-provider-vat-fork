@@ -84,7 +84,10 @@ jobs:
         with:
           python-version: '3.13'
           cache: 'pip'
-      - run: pip install tqdm
+      - name: Install tqdm and retain its CLI across direnv PATH restoration
+        run: |
+          python3 -m pip install tqdm
+          sudo install -m 0755 "$(command -v tqdm)" /usr/local/bin/tqdm
       - name: Setup direnv for provider
         run: direnv export gha >> "$GITHUB_ENV"
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
@@ -166,3 +169,23 @@ jobs:
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider/_run/kube
         run: |
           kubectl get ns,pods,ingress,svc -A
+
+      - name: Generate complete coverage against the configured integration cluster
+        working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
+        env:
+          TEST_INTEGRATION: 'true'
+        run: |
+          make test-coverage
+          test -s .cache/tests/coverage.txt
+          test "$(head -n 1 .cache/tests/coverage.txt)" = 'mode: atomic'
+          printf '%s\n' "$GITHUB_SHA" > .cache/tests/coverage-source.txt
+      - name: Preserve exact-source coverage for its original upload check
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: provider-complete-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            go/src/github.com/akash-network/provider/.cache/tests/coverage.txt
+            go/src/github.com/akash-network/provider/.cache/tests/coverage-source.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2

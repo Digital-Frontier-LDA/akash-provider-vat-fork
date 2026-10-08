@@ -107,3 +107,42 @@ func TestOwnedBuilderSettingsRequireFixedImmutablePackage(t *testing.T) {
 		require.ErrorIs(t, ValidateSettings(Settings{OwnedBuilderImage: image}), ErrSettingsValidation)
 	}
 }
+
+func TestOwnedBuilderPullSecretIsLimitedToExactContract(t *testing.T) {
+	b := ownedBuilderFixture()
+	b.settings.OwnedBuilderImagePullSecretName = "owned-builder-readonly"
+	b.settings.DockerImagePullSecretsName = "legacy-global"
+	require.Equal(t, []corev1.LocalObjectReference{{Name: "owned-builder-readonly"}}, b.imagePullSecrets())
+	require.Empty(t, b.container().VolumeMounts)
+	require.False(t, *b.automountServiceAccountToken())
+	for _, change := range []func(*Workload){
+		func(b *Workload) { b.deployment.(*ClusterDeployment).Lid.Owner = "foreign-owner" },
+		func(b *Workload) { b.group.Services[0].Name = "runner" },
+		func(b *Workload) { b.group.Services[0].Image += "b" },
+		func(b *Workload) { b.group.Services[0].Command = []string{"sh"} },
+		func(b *Workload) { b.group.Services[0].Env = append(b.group.Services[0].Env, "GITHUB_TOKEN=inert") },
+	} {
+		b := ownedBuilderFixture()
+		b.settings.OwnedBuilderImagePullSecretName = "owned-builder-readonly"
+		b.settings.DockerImagePullSecretsName = "legacy-global"
+		change(b)
+		require.Equal(t, []corev1.LocalObjectReference{{Name: "legacy-global"}}, b.imagePullSecrets())
+		require.False(t, *b.container().SecurityContext.AllowPrivilegeEscalation)
+	}
+	b.group.Services[0].Credentials = &mani.ImageCredentials{Host: "ghcr.io", Username: "inert", Password: "inert"}
+	require.NotEqual(t, []corev1.LocalObjectReference{{Name: "owned-builder-readonly"}}, b.imagePullSecrets())
+	require.False(t, *b.container().SecurityContext.AllowPrivilegeEscalation)
+}
+
+func TestOwnedBuilderPullSecretValidation(t *testing.T) {
+	valid := ownedBuilderFixture().settings
+	valid.OwnedBuilderImagePullSecretName = "owned-builder-readonly"
+	require.NoError(t, ValidateSettings(valid))
+	for _, name := range []string{"UPPER", "../other", "space value", "-prefix", "suffix-", strings.Repeat("a", 64)} {
+		changed := valid
+		changed.OwnedBuilderImagePullSecretName = name
+		require.ErrorIs(t, ValidateSettings(changed), ErrSettingsValidation)
+	}
+	valid.OwnedBuilderImage = ""
+	require.ErrorIs(t, ValidateSettings(valid), ErrSettingsValidation)
+}

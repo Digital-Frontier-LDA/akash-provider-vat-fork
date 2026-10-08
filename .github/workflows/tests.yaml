@@ -85,13 +85,22 @@ jobs:
         run: make release
 
   coverage:
+    needs: integration-tests
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
-      - name: Generate coverage in this isolated job
-        run: make test-coverage
+      - name: Download this exact attempt's complete integration coverage
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: provider-complete-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .cache/tests
+      - name: Verify original coverage input and source
+        run: |
+          test -s .cache/tests/coverage.txt
+          test "$(head -n 1 .cache/tests/coverage.txt)" = 'mode: atomic'
+          test "$(cat .cache/tests/coverage-source.txt)" = "$GITHUB_SHA"
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         env:

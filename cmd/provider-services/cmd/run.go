@@ -104,6 +104,7 @@ const (
 	FlagAuthPem                          = "auth-pem"
 	FlagDeploymentRuntimeClass           = "deployment-runtime-class"
 	FlagOwnedBuilderImage                = "owned-builder-image"
+	FlagOwnedBuilderImagePullSecretName  = "owned-builder-image-pull-secret-name"
 	FlagBidTimeout                       = "bid-timeout"
 	FlagReclamationWindow                = "reclamation-window"
 	FlagManifestTimeout                  = "manifest-timeout"
@@ -573,6 +574,7 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	kubeSettings.StorageCommitLevel = overcommitPercentStorage
 	kubeSettings.DeploymentRuntimeClass = deploymentRuntimeClass
 	kubeSettings.OwnedBuilderImage = viper.GetString(FlagOwnedBuilderImage)
+	kubeSettings.OwnedBuilderImagePullSecretName = viper.GetString(FlagOwnedBuilderImagePullSecretName)
 	kubeSettings.DockerImagePullSecretsName = strings.TrimSpace(dockerImagePullSecretsName)
 	kubeSettings.InterconnectRoCENetworksNamespace = strings.TrimSpace(viper.GetString(FlagInterconnectRoCENetworksNS))
 
