@@ -66,6 +66,11 @@ type Settings struct {
 
 	DeploymentRuntimeClass string
 
+	// OwnedBuilderImage enables the fixed owned BuildKit setup exception only
+	// when an operator pins its immutable image. Empty preserves the default
+	// NoNewPrivs policy for every workload. Tenants cannot set this field.
+	OwnedBuilderImage string
+
 	// Name of the image pull secret to use in pod spec
 	DockerImagePullSecretsName string
 
@@ -105,6 +110,9 @@ type Settings struct {
 var ErrSettingsValidation = errors.New("settings validation")
 
 func ValidateSettings(settings Settings) error {
+	if settings.OwnedBuilderImage != "" && !ownedBuilderImagePattern.MatchString(settings.OwnedBuilderImage) {
+		return fmt.Errorf("%w: owned builder image must be the fixed package with an immutable SHA256 digest", ErrSettingsValidation)
+	}
 	if settings.DeploymentIngressStaticHosts {
 		if settings.DeploymentIngressDomain == "" {
 			return fmt.Errorf("%w: empty ingress domain", ErrSettingsValidation)

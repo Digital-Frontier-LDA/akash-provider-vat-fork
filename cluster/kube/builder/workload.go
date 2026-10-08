@@ -136,6 +136,9 @@ func (b *Workload) container() corev1.Container {
 		Privileged:               &falseValue,
 		AllowPrivilegeEscalation: &falseValue,
 	}
+	if b.isOwnedBuilder() {
+		kcontainer.SecurityContext = ownedBuilderSecurityContext()
+	}
 
 	if cpu := service.Resources.CPU; cpu != nil {
 		cpuLimit := int64(cpu.Units.Value())                                                                 // nolint: gosec
