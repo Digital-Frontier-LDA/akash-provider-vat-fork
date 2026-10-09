@@ -136,6 +136,9 @@ func (b *Workload) container() corev1.Container {
 		Privileged:               &falseValue,
 		AllowPrivilegeEscalation: &falseValue,
 	}
+	if b.isOwnedBuilder() {
+		kcontainer.SecurityContext = ownedBuilderSecurityContext()
+	}
 
 	if cpu := service.Resources.CPU; cpu != nil {
 		cpuLimit := int64(cpu.Units.Value())                                                                 // nolint: gosec
@@ -603,6 +606,11 @@ func (b *Workload) selectorLabels() map[string]string {
 }
 
 func (b *Workload) imagePullSecrets() []corev1.LocalObjectReference {
+	// Tenant credentials cannot select this secret or obtain the setup exception.
+	// Unmatched workloads retain their original pull-secret behavior.
+	if b.isOwnedBuilder() && b.settings.OwnedBuilderImagePullSecretName != "" {
+		return []corev1.LocalObjectReference{{Name: b.settings.OwnedBuilderImagePullSecretName}}
+	}
 	sname := b.settings.DockerImagePullSecretsName
 
 	service := &b.group.Services[b.serviceIdx]

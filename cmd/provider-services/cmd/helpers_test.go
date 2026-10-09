@@ -47,3 +47,17 @@ func TestRunCmdDoesNotExposeMonitorHealthcheckFlags(t *testing.T) {
 	require.Nil(t, cmd.Flags().Lookup("monitor-healthcheck-period"))
 	require.Nil(t, cmd.Flags().Lookup("monitor-healthcheck-period-jitter"))
 }
+
+func TestOwnedBuilderPullSecretFlagIsOperatorOnlyAndDefaultOff(t *testing.T) {
+	command := RunCmd()
+	image := command.Flags().Lookup(FlagOwnedBuilderImage)
+	secret := command.Flags().Lookup(FlagOwnedBuilderImagePullSecretName)
+	require.NotNil(t, image)
+	require.NotNil(t, secret)
+	require.Empty(t, image.DefValue)
+	require.Empty(t, secret.DefValue)
+	require.NoError(t, command.ParseFlags([]string{"--owned-builder-image-pull-secret-name=owned-builder-readonly"}))
+	value, err := command.Flags().GetString(FlagOwnedBuilderImagePullSecretName)
+	require.NoError(t, err)
+	require.Equal(t, "owned-builder-readonly", value)
+}

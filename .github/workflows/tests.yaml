@@ -16,13 +16,13 @@ on:
 
 jobs:
   build-bins:
-    runs-on: core-e2e
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'core-e2e' }}
     steps:
       - name: Cleanup build folder
         run: |
           sudo rm -rf ./* || true
           sudo rm -rf ./.??* || true
-          sudo rm -rf $HOME/go/pkg/mod || true
+          sudo rm -rf "$HOME/go/pkg/mod" || true
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
@@ -35,7 +35,7 @@ jobs:
       - run: make docker-image
 
   tests:
-    runs-on: [self-hosted, akash]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -52,16 +52,29 @@ jobs:
         run: bash script/test-provider-recovery-upgrade.sh "$RECOVERY_BASE_REF"
 
   lint:
-    runs-on: [self-hosted, akash]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
       - name: Run linter
         run: make lint
 
+      - name: Reject lint findings introduced by this source
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+        env:
+          LINT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$LINT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$LINT_BASE_SHA^{commit}"
+          .cache/bin/golangci-lint run ./... --new-from-rev="$LINT_BASE_SHA" --issues-exit-code=1 --timeout=20m
+
   release-dry-run:
-    runs-on: core-e2e
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'core-e2e' }}
     env:
       DOCKER_CLI_EXPERIMENTAL: "enabled"
     steps:
@@ -78,18 +91,29 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: fregante/setup-git-user@024bc0b8e177d7e77203b48dab6fb45666854b35 # v2
       - name: configure git tag
-        run: echo "RELEASE_TAG=v$(./script/semver.sh bump patch $(git describe --tags --abbrev=0))" >> $GITHUB_ENV
+        run: echo "RELEASE_TAG=v$(./script/semver.sh bump patch "$(git describe --tags --abbrev=0)")" >> "$GITHUB_ENV"
       - name: git tag
         run: git tag -a ${{ env.RELEASE_TAG }} -m ${{ env.RELEASE_TAG }}
       - name: release dry-run
         run: make release
 
   coverage:
-    runs-on: [self-hosted, akash]
+    needs: integration-tests
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
         uses: ./.github/actions/setup-ubuntu
+      - name: Download this exact attempt's complete integration coverage
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: provider-complete-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .cache/tests
+      - name: Verify original coverage input and source
+        run: |
+          test -s .cache/tests/coverage.txt
+          test "$(head -n 1 .cache/tests/coverage.txt)" = 'mode: atomic'
+          test "$(cat .cache/tests/coverage-source.txt)" = "$GITHUB_SHA"
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         env:
@@ -98,7 +122,7 @@ jobs:
           files: .cache/tests/coverage.txt
 
   yamlcheck:
-    runs-on: [self-hosted, akash]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: check-yml-count
