@@ -16,7 +16,7 @@ on:
 
 jobs:
   build-bins:
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'core-e2e' }}
+    runs-on: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'ubuntu-24.04' || 'core-e2e' }}
     steps:
       - name: Cleanup build folder
         run: |
@@ -35,7 +35,7 @@ jobs:
       - run: make docker-image
 
   tests:
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -52,7 +52,7 @@ jobs:
         run: bash script/test-provider-recovery-upgrade.sh "$RECOVERY_BASE_REF"
 
   lint:
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -74,7 +74,7 @@ jobs:
           .cache/bin/golangci-lint run ./... --new-from-rev="$LINT_BASE_SHA" --issues-exit-code=1 --timeout=20m
 
   release-dry-run:
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'core-e2e' }}
+    runs-on: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'ubuntu-24.04' || 'core-e2e' }}
     env:
       DOCKER_CLI_EXPERIMENTAL: "enabled"
     steps:
@@ -99,7 +99,7 @@ jobs:
 
   coverage:
     needs: integration-tests
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Setup environment
@@ -122,7 +122,7 @@ jobs:
           files: .cache/tests/coverage.txt
 
   yamlcheck:
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ubuntu-24.04"]' || '["self-hosted","akash"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: check-yml-count
