@@ -94,6 +94,23 @@ type wsStreamConfig struct {
 func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client, ctxConfig map[interface{}]interface{}, middlewares ...mux.MiddlewareFunc) *mux.Router {
 	router := mux.NewRouter()
 
+	// MUST stay the first middleware: the first one registered is the outermost, so
+	// this clears after every other middleware (df-telemetry reads claims after
+	// its handler returns) and handler has finished with the request.
+	//
+	// gorilla/context stores request values in a package-level map keyed by
+	// *http.Request and only Clear removes them. gorilla/mux stopped calling Clear
+	// when it moved to Request.Context(), so without this every request leaked its
+	// entry, and with it the request, its TLS state and every value stored below.
+	// prepareAuthMiddleware stores claims on every request, unauthenticated routes
+	// included. Measured on oni_dc: ~110 MiB/h, driven by inbound REST traffic
+	// (akash-providers-IaC#202, upstream akash-network/support#658).
+	//
+	// mux hands the same *http.Request to the whole middleware chain, subrouters
+	// included, and nothing in this package calls WithContext, so every Set below
+	// is keyed by the pointer this middleware clears.
+	router.Use(clearRequestContextMiddleware)
+
 	// store provider address in context as a lease's endpoints below need it
 	router.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
