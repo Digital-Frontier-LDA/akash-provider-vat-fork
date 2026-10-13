@@ -18,6 +18,14 @@ on:
         required: true
         type: string
 
+# One build per release tag at a time, QUEUED, never cancelled. Without it two dispatches
+# with the same new tag could both pass the "refuse to reuse" check below before either
+# pushes, and the second push would move the tag (akash-providers-IaC#233). Queued, the
+# second run checks only after the first has pushed, and stops.
+concurrency:
+  group: df-build-image-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: false
+
 # Default every job to read-only; the build job re-declares what it actually
 # needs. Without a top-level block the default for jobs that don't declare one
 # is the repo-wide setting, which is not necessarily read-only.
