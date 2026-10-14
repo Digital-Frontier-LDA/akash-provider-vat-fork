@@ -142,6 +142,23 @@ func (inv *inventory) tryAdjust(
 	nd := inv.Nodes[node].Dup()
 	sparams := &crd.SchedulerParams{}
 
+	// tryAdjustGPU narrows res.GPU.Attributes to the one model it matched on
+	// this node, and Adjust passes the same res to every node it tries. If this
+	// node then fails a later check (memory, storage, the CC sidecar), the
+	// narrowed attributes would carry over, and an any-model or multi-model
+	// request could then only match this node's model: a later node with a
+	// different free GPU and room for the order was skipped, and the bid
+	// declined for insufficient capacity. Put them back unless this node is
+	// committed. tryAdjustGPU replaces the slice rather than editing it, so
+	// keeping the old slice header is enough.
+	gpuAttrs := res.GPU.Attributes
+	committed := false
+	defer func() {
+		if !committed {
+			res.GPU.Attributes = gpuAttrs
+		}
+	}()
+
 	if !tryAdjustCPU(&nd.Resources.CPU, res.CPU) {
 		return nil, false, true
 	}
@@ -235,6 +252,7 @@ func (inv *inventory) tryAdjust(
 	// commit and move on
 	inv.Nodes[node] = nd
 	inv.Storage = storageClasses
+	committed = true
 
 	// AKT-443: register this resource's interconnect_group claim on the node so
 	// peers in the same group are forced onto distinct nodes by the early
