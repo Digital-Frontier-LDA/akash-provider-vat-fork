@@ -76,5 +76,5 @@ func TestAdjust_AnyModelGPU_SkipsNodeThatMatchesGPUButLacksMemory(t *testing.T) 
 
 	require.NoError(t, inv.Adjust(res))
 	require.Equal(t, attrtypes.Attributes{{Key: "vendor/nvidia/model/p40", Value: "true"}},
-		res.GetAllocatedResources()[0].Resources.GPU.Attributes)
+		res.GetAllocatedResources()[0].GPU.Attributes)
 }

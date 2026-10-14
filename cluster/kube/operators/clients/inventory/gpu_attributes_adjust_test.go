@@ -90,7 +90,7 @@ func requireLandedOn(t *testing.T, res *testReservation, model string) {
 	allocated := res.GetAllocatedResources()
 	require.Len(t, allocated, 1)
 	require.Equal(t, attrtypes.Attributes{{Key: "vendor/nvidia/model/" + model, Value: "true"}},
-		allocated[0].Resources.GPU.Attributes)
+		allocated[0].GPU.Attributes)
 
 	cparams, ok := res.ClusterParams().(crd.ReservationClusterSettings)
 	require.True(t, ok)
