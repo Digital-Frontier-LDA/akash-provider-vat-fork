@@ -287,6 +287,17 @@ func (inv *inventory) tryAdjust(node int, res *rtypes.Resources, teeType ctypes.
 	nd := inv.Nodes[node].Dup()
 	sparams := &crd.SchedulerParams{}
 
+	// Same as the operator inventory's tryAdjust: tryAdjustGPU narrows
+	// res.GPU.Attributes to the model it matched, and Adjust reuses res for
+	// every node, so undo the narrowing unless this node is committed.
+	gpuAttrs := res.GPU.Attributes
+	committed := false
+	defer func() {
+		if !committed {
+			res.GPU.Attributes = gpuAttrs
+		}
+	}()
+
 	if !tryAdjustCPU(&nd.Resources.CPU, res.CPU) {
 		return nil, false, true
 	}
@@ -372,6 +383,7 @@ func (inv *inventory) tryAdjust(node int, res *rtypes.Resources, teeType ctypes.
 	// commit and move on
 	inv.Nodes[node] = nd
 	inv.Storage = storageClasses
+	committed = true
 
 	if reflect.DeepEqual(sparams, &crd.SchedulerParams{}) {
 		return nil, true, true
