@@ -30,6 +30,15 @@ func (s *fakeStatusStream) Send(m *providerv1.Status) error {
 	return nil
 }
 
+// publishTracked publishes a provider status the way statusRun does, and closes finalized
+// once the cluster status it points at (in production, the one holding the inventory
+// snapshot) has been garbage collected.
+func publishTracked(bus tpubsub.PubSub, topics []string, finalized chan struct{}) {
+	cluster := &providerv1.ClusterStatus{}
+	runtime.SetFinalizer(cluster, func(*providerv1.ClusterStatus) { close(finalized) })
+	bus.Pub(providerv1.Status{Cluster: cluster}, topics)
+}
+
 // TestStreamStatusReleasesSubscriptionWhenClientLeaves pins the fix for the provider's
 // inventory-snapshot memory leak (akash-providers-IaC#202, round 2).
 //
@@ -76,16 +85,11 @@ func TestStreamStatusReleasesSubscriptionWhenClientLeaves(t *testing.T) {
 		t.Fatal("StreamStatus did not return after its client left")
 	}
 
-	// Clear the retained status, then publish one the way statusRun does, with a
-	// finalizer on the cluster status it points at (in production that holds the
-	// inventory snapshot).
+	// Clear the retained status, so that only a subscription can still hold one.
 	bus.Pub(nil, topics)
 
 	finalized := make(chan struct{})
-	cluster := &providerv1.ClusterStatus{}
-	runtime.SetFinalizer(cluster, func(*providerv1.ClusterStatus) { close(finalized) })
-	bus.Pub(providerv1.Status{Cluster: cluster}, topics)
-	cluster = nil //nolint: ineffassign,wastedassign
+	publishTracked(bus, topics, finalized)
 
 	deadline := time.After(5 * time.Second)
 	for {
