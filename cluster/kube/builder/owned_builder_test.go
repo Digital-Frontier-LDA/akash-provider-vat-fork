@@ -8,7 +8,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	mani "pkg.akt.dev/go/manifest/v2beta3"
 	mtypes "pkg.akt.dev/go/node/market/v1"
+	attrtypes "pkg.akt.dev/go/node/types/attributes/v1"
 	resources "pkg.akt.dev/go/node/types/resources/v1beta4"
+	"pkg.akt.dev/go/testutil"
 
 	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 )
@@ -84,6 +86,17 @@ func TestOwnedBuilderCannotSelectItsOwnException(t *testing.T) {
 			b.group.Services[0].Resources.GPU = &resources.GPU{Units: resources.NewResourceValue(1)}
 			b.sparams[0] = &crd.SchedulerParams{Resources: &crd.SchedulerResources{GPU: &crd.SchedulerResourceGPU{Vendor: GPUVendorNvidia}}}
 		},
+		"gpu-attributes-without-units": func(b *Workload) {
+			b.group.Services[0].Resources.GPU = &resources.GPU{
+				Units: resources.NewResourceValue(0), Attributes: attrtypes.Attributes{{Key: "vendor", Value: "nvidia"}},
+			}
+		},
+		"scheduler-gpu-without-units": func(b *Workload) {
+			b.sparams[0] = &crd.SchedulerParams{Resources: &crd.SchedulerResources{GPU: &crd.SchedulerResourceGPU{Vendor: GPUVendorNvidia}}}
+		},
+		"scheduler-interconnect": func(b *Workload) {
+			b.sparams[0] = &crd.SchedulerParams{Resources: &crd.SchedulerResources{Interconnect: &crd.SchedulerResourceInterconnect{}}}
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -147,4 +160,92 @@ func TestOwnedBuilderPullSecretValidation(t *testing.T) {
 	}
 	valid.OwnedBuilderImage = ""
 	require.ErrorIs(t, ValidateSettings(valid), ErrSettingsValidation)
+}
+
+func TestOwnedBuilderLifetimeMatchesPublishedEntrypoint(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		admit bool
+	}{
+		{"60", true}, {"120", true}, {"3599", true}, {"3600", true},
+		{"0060", true}, {"060", true},
+		{"", false}, {"0", false}, {"59", false}, {"3601", false},
+		{"00060", false}, {"99999999999999999999999999", false},
+		{"-60", false}, {"+60", false}, {"60.0", false}, {"6e2", false},
+		{" 60", false}, {"60 ", false}, {"60\n", false}, {"６０", false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			b := ownedBuilderFixture()
+			b.settings.OwnedBuilderImagePullSecretName = ownedBuilderTestPullSecret
+			b.group.Services[0].Env = append(b.group.Services[0].Env, "BUILDER_TTL_SECONDS="+tc.value)
+			require.Equal(t, tc.admit, *b.container().SecurityContext.AllowPrivilegeEscalation)
+			if tc.admit {
+				require.Equal(t, []corev1.LocalObjectReference{{Name: ownedBuilderTestPullSecret}}, b.imagePullSecrets())
+			} else {
+				require.Empty(t, b.imagePullSecrets())
+			}
+		})
+	}
+	b := ownedBuilderFixture()
+	b.group.Services[0].Env = append(b.group.Services[0].Env, "BUILDER_TTL_SECONDS=60", "BUILDER_TTL_SECONDS=60")
+	require.False(t, *b.container().SecurityContext.AllowPrivilegeEscalation)
+}
+
+func TestOwnedBuilderGeneratedPodContract(t *testing.T) {
+	for _, admitted := range []bool{true, false} {
+		name := "invalid-lifetime"
+		if admitted {
+			name = "default-lifetime"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := ownedBuilderFixture()
+			fixture.settings.OwnedBuilderImagePullSecretName = ownedBuilderTestPullSecret
+			if !admitted {
+				fixture.group.Services[0].Env = append(fixture.group.Services[0].Env, "BUILDER_TTL_SECONDS=3601")
+			}
+			dep := fixture.deployment.(*ClusterDeployment)
+			dep.Lid = testutil.LeaseID(t)
+			dep.Lid.Owner = ownedBuilderOwner
+			params := crd.ClusterSettings{SchedulerParams: []*crd.SchedulerParams{nil}}
+			manifest, err := crd.NewManifest("lease", dep.Lid, &fixture.group, params)
+			require.NoError(t, err)
+			b, err := NewWorkloadBuilder(testutil.Logger(t), fixture.settings, dep, manifest, 0)
+			require.NoError(t, err)
+
+			dbuilder := NewDeployment(b)
+			d, err := dbuilder.Create()
+			require.NoError(t, err)
+			updatedDeployment, err := dbuilder.Update(d)
+			require.NoError(t, err)
+			sbuilder := BuildStatefulSet(b)
+			s, err := sbuilder.Create()
+			require.NoError(t, err)
+			updatedStatefulSet, err := sbuilder.Update(s)
+			require.NoError(t, err)
+			for _, pod := range []corev1.PodSpec{d.Spec.Template.Spec, updatedDeployment.Spec.Template.Spec,
+				s.Spec.Template.Spec, updatedStatefulSet.Spec.Template.Spec} {
+				require.Len(t, pod.Containers, 1)
+				require.Empty(t, pod.InitContainers)
+				require.Empty(t, pod.Volumes)
+				require.Empty(t, pod.ServiceAccountName)
+				require.False(t, *pod.AutomountServiceAccountToken)
+				require.False(t, pod.HostNetwork)
+				require.False(t, pod.HostPID)
+				require.False(t, pod.HostIPC)
+				require.Nil(t, pod.ShareProcessNamespace)
+				require.Nil(t, pod.RuntimeClassName)
+				container := pod.Containers[0]
+				require.Empty(t, container.VolumeMounts)
+				require.False(t, *container.SecurityContext.Privileged)
+				require.Equal(t, admitted, *container.SecurityContext.AllowPrivilegeEscalation)
+				if admitted {
+					require.Equal(t, ownedBuilderSecurityContext(), container.SecurityContext)
+					require.Equal(t, []corev1.LocalObjectReference{{Name: ownedBuilderTestPullSecret}}, pod.ImagePullSecrets)
+				} else {
+					require.Nil(t, container.SecurityContext.Capabilities)
+					require.Empty(t, pod.ImagePullSecrets)
+				}
+			}
+		})
+	}
 }

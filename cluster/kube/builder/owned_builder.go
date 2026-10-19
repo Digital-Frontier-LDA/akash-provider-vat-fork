@@ -2,6 +2,7 @@ package builder
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,16 +24,24 @@ func (b *Workload) isOwnedBuilder() bool {
 	}
 	service := &b.group.Services[b.serviceIdx]
 	if service.Name != ownedBuilderService || service.Image != image || service.Count != 1 ||
-		len(service.Command) != 0 || len(service.Args) != 0 || service.Resources.GPU != nil ||
+		len(service.Command) != 0 || len(service.Args) != 0 ||
 		service.Credentials != nil || service.InterconnectGroup != "" {
+		return false
+	}
+	// CRD decoding materializes a zero-unit GPU even for CPU-only services.
+	// Its presence alone is not a GPU request; units or attributes are.
+	if gpu := service.Resources.GPU; gpu != nil && (gpu.Units.Value() != 0 || len(gpu.Attributes) != 0) {
 		return false
 	}
 	if service.Params != nil && (len(service.Params.Storage) != 0 || service.Params.Permissions != nil ||
 		service.Params.Credentials != nil || service.Params.TEE != nil) {
 		return false
 	}
-	if params := b.sparams[b.serviceIdx]; params != nil && params.RuntimeClass != "" {
-		return false
+	if params := b.sparams[b.serviceIdx]; params != nil {
+		if params.RuntimeClass != "" || (params.Resources != nil &&
+			(params.Resources.GPU != nil || params.Resources.Interconnect != nil)) {
+			return false
+		}
 	}
 	// No command overrides, mounted payloads, workload permissions, extra
 	// credentials or RootlessKit control variables enter the setup process.
@@ -48,6 +57,22 @@ func (b *Workload) isOwnedBuilder() bool {
 		seen, ok := allowed[parts[0]]
 		if !ok || seen {
 			return false
+		}
+		if parts[0] == "BUILDER_TTL_SECONDS" {
+			// Match the immutable entrypoint's ASCII decimal and length limits
+			// before granting setup privileges or the dedicated pull reference.
+			if len(parts[1]) > 4 {
+				return false
+			}
+			for _, digit := range parts[1] {
+				if digit < '0' || digit > '9' {
+					return false
+				}
+			}
+			ttl, err := strconv.Atoi(parts[1])
+			if err != nil || ttl < 60 || ttl > 3600 {
+				return false
+			}
 		}
 		allowed[parts[0]] = true
 	}

@@ -18,7 +18,11 @@ operator-pinned image and one replica. It rejects command/argument overrides,
 GPU, interconnect or custom runtime requests, mounted payloads, workload API
 permissions, image credentials and TEE parameters. The only tenant environment
 fields accepted are the three required per-attempt server TLS fields and optional
-bounded lifetime; duplicates, empty fields and unknown names reject the exception.
+bounded lifetime. If specified, the lifetime must contain one to four ASCII decimal
+digits representing 60–3600 seconds; omission retains the image default of 3600.
+Duplicates, empty fields and unknown names reject the exception. A decoded
+zero-unit GPU with no attributes represents a CPU-only service; nonzero GPU
+units, GPU attributes and scheduler GPU/interconnect assignments are excluded.
 All unmatched shapes receive the ordinary provider security context.
 
 An admitted builder receives outer UID/GID 1000, non-root execution, privileged
@@ -121,3 +125,16 @@ with a zero issues exit code. It remains intact, and an additional PR/main step
 fails on findings introduced relative to the exact verified base commit. Its
 comparison uses full Git history and the same repository linter/configuration.
 This prevents a new finding from being hidden by the original report-only mode.
+
+## Published-image verification follow-through
+
+[Immutable-image verification 39257916461](https://github.com/Digital-Frontier-LDA/df-akash-runner/actions/runs/39257916461)
+passed on native hosted AMD64 and ARM64 using the published digest above and
+its unchanged source harness. The publishing repository used scoped
+`packages: read` access for pull and removed registry authentication before
+starting containers. Both architectures passed authenticated build, anonymous
+and foreign-client refusal, daemon/build NoNewPrivs, lifetime expiry and cleanup.
+This proves the hosted pull path; it does not deliver a credential to the provider
+or establish live runtime, application workload or deployment settlement results.
+See [the lifetime and PodSpec verification spec](owned-builder-lifetime-spec.md)
+for the provider follow-through. Both operator settings remain unset by default.
