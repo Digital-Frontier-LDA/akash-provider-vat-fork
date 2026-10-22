@@ -180,6 +180,15 @@ func addRunFlags(cmd *cobra.Command) error {
 	if err := viper.BindPFlag(FlagDeploymentRuntimeClass, cmd.Flags().Lookup(FlagDeploymentRuntimeClass)); err != nil {
 		return err
 	}
+	cmd.Flags().String(FlagOwnedBuilderImage, "", "operator-approved immutable owned BuildKit image; empty disables the fixed setup exception")
+	if err := viper.BindPFlag(FlagOwnedBuilderImage, cmd.Flags().Lookup(FlagOwnedBuilderImage)); err != nil {
+		return err
+	}
+
+	cmd.Flags().String(FlagOwnedBuilderImagePullSecretName, "", "operator-created read-only registry secret in the lease namespace; referenced only by the exact owned builder")
+	if err := viper.BindPFlag(FlagOwnedBuilderImagePullSecretName, cmd.Flags().Lookup(FlagOwnedBuilderImagePullSecretName)); err != nil {
+		return err
+	}
 
 	cmd.Flags().Duration(FlagBidTimeout, 5*time.Minute, "time after which bids are cancelled if no lease is created")
 	if err := viper.BindPFlag(FlagBidTimeout, cmd.Flags().Lookup(FlagBidTimeout)); err != nil {
@@ -208,6 +217,11 @@ func addRunFlags(cmd *cobra.Command) error {
 
 	cmd.Flags().String(FlagMetricsListener, "", "ip and port to start the metrics listener on")
 	if err := viper.BindPFlag(FlagMetricsListener, cmd.Flags().Lookup(FlagMetricsListener)); err != nil {
+		return err
+	}
+
+	cmd.Flags().Bool(FlagPprofEnabled, false, "serve net/http/pprof under /debug/pprof on the metrics listener (requires --metrics-listener)")
+	if err := viper.BindPFlag(FlagPprofEnabled, cmd.Flags().Lookup(FlagPprofEnabled)); err != nil {
 		return err
 	}
 

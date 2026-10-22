@@ -73,6 +73,7 @@ func (hopc *client) Check(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer clusterutil.DrainAndClose(response.Body)
 	hopc.log.Info("check result", "status", response.StatusCode)
 
 	if response.StatusCode != http.StatusOK {

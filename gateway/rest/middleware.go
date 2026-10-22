@@ -101,6 +101,16 @@ func requireEndpointScopeForLeaseID(scope ajwt.PermissionScope) mux.MiddlewareFu
 	}
 }
 
+// clearRequestContextMiddleware removes everything gorilla/context holds for the
+// request once the rest of the chain has returned. See its registration in newRouter.
+func clearRequestContextMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer context.Clear(r)
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func requireOwner(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims := requestClaims(r)

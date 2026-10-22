@@ -1,0 +1,38 @@
+name: Verify default-off owned builder policy
+
+on:
+  pull_request:
+    paths:
+      - 'cluster/kube/builder/**'
+      - 'cmd/provider-services/cmd/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/owned-builder-policy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'cluster/kube/builder/**'
+      - 'cmd/provider-services/cmd/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/owned-builder-policy.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Actual container policy and operator wiring
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Complete builder and operator command test suites
+        run: go test -count=1 ./cluster/kube/builder ./cmd/provider-services/cmd
