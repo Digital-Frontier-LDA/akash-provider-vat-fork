@@ -2,6 +2,8 @@ module github.com/akash-network/provider
 
 go 1.26.2
 
+toolchain go1.26.10
+
 require (
 	cosmossdk.io/errors v1.0.2
 	cosmossdk.io/log v1.6.1
