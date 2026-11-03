@@ -50,6 +50,13 @@ var (
 	errInsufficientIPs          = fmt.Errorf("%w: insufficient number of IPs", errInventoryReservation)
 
 	inventoryStatusQuantityZero = resource.NewQuantity(0, resource.DecimalSI)
+
+	// ipCheckTimeout bounds one runCheck pass. Reservations are not processed
+	// while a pass is in flight (updateIPs sets reservech to nil until runch
+	// delivers), and the run loop's context is never cancelled, so without a
+	// bound a single stuck IP operator request stops all bidding for the life
+	// of the process. A var so tests can shorten it.
+	ipCheckTimeout = 30 * time.Second
 )
 
 var (
@@ -157,6 +164,30 @@ func newInventoryService(
 		res := newReservation(d.LeaseID().OrderID(), d.ManifestGroup())
 		res.SetClusterParams(d.ClusterParams())
 		res.teeType = teeTypeFromClusterParams(d.ClusterParams())
+
+		// These deployments are already running in the cluster - that is where
+		// this slice comes from - so their resources are already reflected in the
+		// node metrics the inventory reports. They must therefore start allocated:
+		// a pending reservation is subtracted from availability a second time,
+		// double-counting every existing lease from the moment the provider boots.
+		//
+		// Nothing reliably corrects this afterwards. The run loop only begins
+		// consuming ClusterDeployment events once waiter.WaitForAll returns, so
+		// statuses published during operator startup are missed, and the monitor
+		// re-publishes only on a *change* - a healthy deployment never leaves
+		// Deployed, so it never re-emits one.
+		res.allocated = true
+
+		// Mirror the accounting the allocated transition would have done.
+		// unreserve reclaims these for allocated reservations, so skipping it
+		// here would leak external ports on every restart.
+		if n := reservationCountEndpoints(res); n <= is.availableExternalPorts {
+			is.availableExternalPorts -= n
+		} else {
+			is.log.Error("external port accounting underflow at startup",
+				"order", res.OrderID(), "need", n, "available", is.availableExternalPorts)
+			is.availableExternalPorts = 0
+		}
 
 		reservations = append(reservations, res)
 	}
@@ -660,7 +691,20 @@ loop:
 					}
 
 					allocatedPrev := res.allocated
-					res.allocated = ev.Status == event.ClusterDeploymentDeployed
+
+					// Updated means "updated but may not be functional" (see
+					// event.ClusterDeploymentUpdated) - it carries no verdict on health, so
+					// it must be allocation-neutral. Deriving allocated from it cleared the
+					// flag on every deploy/update, and because the monitor publishes only on
+					// a status *change* - and a healthy deployment never leaves Deployed -
+					// nothing ever set it back. The reservation stayed pending for the life
+					// of the process and its resources were counted twice (running pods plus
+					// a still-held reservation), shrinking advertised capacity until the
+					// provider was restarted. Real health transitions still arrive from the
+					// monitor as Deployed/Pending, which is what should move this flag.
+					if ev.Status != event.ClusterDeploymentUpdated {
+						res.allocated = ev.Status == event.ClusterDeploymentDeployed
+					}
 
 					if res.allocated != allocatedPrev {
 						externalPortCount := reservationCountEndpoints(res)
@@ -873,6 +917,9 @@ func (is *inventoryService) runCheck(ctx context.Context, state *inventoryServic
 	}
 
 	return runner.Do(func() runner.Result {
+		ctx, cancel := context.WithTimeout(ctx, ipCheckTimeout)
+		defer cancel()
+
 		retval := runCheckResult{}
 		var err error
 

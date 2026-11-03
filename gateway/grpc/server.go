@@ -169,6 +169,11 @@ func (gm *grpcProviderV1) StreamStatus(_ *emptypb.Empty, stream providerv1.Provi
 	}
 
 	events := bus.Sub(ptypes.PubSubTopicProviderStatus)
+	// A subscription queues every message until it is read, without limit, and lives until
+	// Unsub. Without this, each client that left stranded its subscription, and every later
+	// provider status, inventory snapshot included, piled up in it for the life of the
+	// process (akash-providers-IaC#202).
+	defer bus.Unsub(events)
 
 	for {
 		select {
@@ -176,7 +181,11 @@ func (gm *grpcProviderV1) StreamStatus(_ *emptypb.Empty, stream providerv1.Provi
 			return gm.ctx.Err()
 		case <-stream.Context().Done():
 			return stream.Context().Err()
-		case evt := <-events:
+		case evt, ok := <-events:
+			if !ok {
+				// The bus shut down and closed the channel; a nil evt would panic below.
+				return status.Error(codes.Unavailable, "provider status bus closed")
+			}
 			val := evt.(providerv1.Status)
 			if err := stream.Send(&val); err != nil {
 				return err

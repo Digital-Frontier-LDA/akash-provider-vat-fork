@@ -72,6 +72,7 @@ func (ipoc *client) Check(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer clusterutil.DrainAndClose(response.Body)
 	ipoc.log.Info("check result", "status", response.StatusCode)
 
 	if response.StatusCode != http.StatusOK {
@@ -108,7 +109,12 @@ func (ipoc *client) GetIPAddressStatus(ctx context.Context, orderID mtypes.Order
 	if err != nil {
 		return nil, err
 	}
+<<<<<<< ours
 	log.Debug("ip address status request result", "status", response.StatusCode)
+=======
+	defer clusterutil.DrainAndClose(response.Body)
+	ipoc.log.Debug("ip address status request result", "status", response.StatusCode)
+>>>>>>> theirs
 
 	if response.StatusCode == http.StatusNoContent {
 		return nil, nil // No data for this lease
@@ -139,6 +145,7 @@ func (ipoc *client) GetIPAddressUsage(ctx context.Context) (cip.AddressUsage, er
 	if err != nil {
 		return cip.AddressUsage{}, err
 	}
+	defer clusterutil.DrainAndClose(response.Body)
 
 	if response.StatusCode != http.StatusOK {
 		return cip.AddressUsage{}, extractRemoteError(response)

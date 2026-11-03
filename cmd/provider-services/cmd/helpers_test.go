@@ -140,6 +140,7 @@ func TestRunCmdDoesNotExposeMonitorHealthcheckFlags(t *testing.T) {
 	require.Nil(t, cmd.Flags().Lookup("monitor-healthcheck-period-jitter"))
 }
 
+<<<<<<< ours
 // A withdrawal period of 0 turns withdrawals off. A negative one is a mistake,
 // not another way to turn them off, and a period shorter than the funds check
 // interval cannot be kept. Each error names the flag and the range it accepts.
@@ -172,4 +173,18 @@ func TestValidateWithdrawalPeriod(t *testing.T) {
 			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
+=======
+func TestOwnedBuilderPullSecretFlagIsOperatorOnlyAndDefaultOff(t *testing.T) {
+	command := RunCmd()
+	image := command.Flags().Lookup(FlagOwnedBuilderImage)
+	secret := command.Flags().Lookup(FlagOwnedBuilderImagePullSecretName)
+	require.NotNil(t, image)
+	require.NotNil(t, secret)
+	require.Empty(t, image.DefValue)
+	require.Empty(t, secret.DefValue)
+	require.NoError(t, command.ParseFlags([]string{"--owned-builder-image-pull-secret-name=owned-builder-readonly"}))
+	value, err := command.Flags().GetString(FlagOwnedBuilderImagePullSecretName)
+	require.NoError(t, err)
+	require.Equal(t, "owned-builder-readonly", value)
+>>>>>>> theirs
 }
