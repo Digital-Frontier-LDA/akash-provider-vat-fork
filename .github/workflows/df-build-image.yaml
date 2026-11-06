@@ -18,6 +18,14 @@ on:
         required: true
         type: string
 
+# One build per release tag at a time, QUEUED, never cancelled. Without it two dispatches
+# with the same new tag could both pass the "refuse to reuse" check below before either
+# pushes, and the second push would move the tag (akash-providers-IaC#233). Queued, the
+# second run checks only after the first has pushed, and stops.
+concurrency:
+  group: df-build-image-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: false
+
 # Default every job to read-only; the build job re-declares what it actually
 # needs. Without a top-level block the default for jobs that don't declare one
 # is the repo-wide setting, which is not necessarily read-only.
@@ -57,6 +65,26 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # A release tag names exactly one build. v0.16.2-df.1 was pushed twice, onto two
+      # different images, so two clusters ran a digest whose name had moved and both
+      # builds reported the same version to Console (akash-providers-IaC#233). Checked
+      # BEFORE the build so a reused tag costs seconds, not a full goreleaser run. Only
+      # "manifest unknown" counts as free: any other failure to look stops the build,
+      # because a guard that cannot see must not pass.
+      - name: Refuse to reuse an existing release tag
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          [ -n "$RELEASE_TAG_INPUT" ] || exit 0
+          ref="ghcr.io/digital-frontier-lda/akash-provider-vat-fork:${RELEASE_TAG_INPUT}-amd64"
+          if out=$(docker manifest inspect "$ref" 2>&1); then
+            echo "::error::$ref already exists. Bump df.N; never move a release tag onto a new build (akash-providers-IaC#233)."
+            exit 1
+          fi
+          case "$out" in
+            *"manifest unknown"*) echo "$ref is free" ;;
+            *) echo "::error::could not tell whether $ref exists: $out"; exit 1 ;;
+          esac
       - name: Build provider image (snapshot)
         # release_tag reaches the shell via env, not ${{ }} interpolation in run:
         # (zizmor/CodeRabbit template-injection rule — a crafted input could
