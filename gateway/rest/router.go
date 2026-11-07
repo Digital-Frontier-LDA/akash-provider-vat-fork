@@ -120,7 +120,7 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client, ctxCon
 		})
 	})
 
-	router.Use(prepareAuthMiddleware)
+	router.Use(prepareAuthMiddleware(log))
 	router.Use(dftelemetry.Middleware(dftelemetry.Shared(), requestClaims)) // Digital Frontier VAT telemetry hook — see df-telemetry/
 
 	router.Use(middlewares...)
@@ -263,7 +263,7 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 	return func(rw http.ResponseWriter, req *http.Request) {
 		leaseID := requestLeaseID(req)
 
-		localLog := log.With("lease", leaseID.String(), "action", "shell")
+		localLog := log.With("lid", leaseID, "action", "shell")
 
 		vars := req.URL.Query()
 		var cmd []string
@@ -515,7 +515,7 @@ func createManifestHandler(log log.Logger, mclient pmanifest.Client) http.Handle
 		subctx, cancel := context.WithTimeout(req.Context(), manifestSubmitTimeout)
 		defer cancel()
 		if err := mclient.Submit(subctx, did, mani); err != nil {
-			log.Error("manifest submit failed", "err", err)
+			log.Error("manifest submit failed", "did", did, "err", err)
 			http.Error(w, err.Error(), httperror.StatusCodeFrom(err))
 			return
 		}
@@ -559,11 +559,12 @@ func leaseKubeEventsHandler(log log.Logger, cclient cluster.ReadClient) http.Han
 			return
 		}
 
+		lid := requestLeaseID(r)
 		wsEventWriter(r.Context(), ws, wsStreamConfig{
-			lid:      requestLeaseID(r),
+			lid:      lid,
 			follow:   requestLogFollow(r),
 			services: requestServices(r),
-			log:      log,
+			log:      log.With("lid", lid),
 			client:   cclient,
 		})
 	}
@@ -603,7 +604,7 @@ func leaseStatusHandler(log log.Logger, cclient cluster.ReadClient, clusterSetti
 			}
 
 			if hasLeasedIPs {
-				log.Debug("querying for IP address status", "lease-id", leaseID)
+				log.Debug("querying for IP address status", "lid", leaseID)
 				ipLeaseStatus, err = clIP.GetIPAddressStatus(req.Context(), leaseID.OrderID())
 				if err != nil {
 					writeClusterError(w, err)
@@ -682,12 +683,13 @@ func leaseLogsHandler(log log.Logger, cclient cluster.ReadClient) http.HandlerFu
 			return
 		}
 
+		lid := requestLeaseID(r)
 		wsLogWriter(r.Context(), ws, wsStreamConfig{
-			lid:       requestLeaseID(r),
+			lid:       lid,
 			services:  requestServices(r),
 			follow:    requestLogFollow(r),
 			tailLines: requestLogTailLines(r),
-			log:       log,
+			log:       log.With("lid", lid),
 			client:    cclient,
 		})
 	}
@@ -738,10 +740,10 @@ func wsLogWriter(ctx context.Context, ws *websocket.Conn, cfg wsStreamConfig) {
 
 	logs, err := cfg.client.LeaseLogs(cctx, cfg.lid, cfg.services, cfg.follow, cfg.tailLines)
 	if err != nil {
-		cfg.log.Error("couldn't fetch logs", "err", err.Error())
+		cfg.log.Error("couldn't fetch logs", "err", err)
 		err = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocketCloseCodeFrom(err), ""))
 		if err != nil {
-			cfg.log.Error("couldn't push control message through websocket", "err", err.Error())
+			cfg.log.Error("couldn't push control message through websocket", "err", err)
 		}
 		return
 	}
@@ -832,10 +834,10 @@ func wsEventWriter(ctx context.Context, ws *websocket.Conn, cfg wsStreamConfig) 
 
 	evts, err := cfg.client.LeaseEvents(cctx, cfg.lid, cfg.services, cfg.follow)
 	if err != nil {
-		cfg.log.Error("couldn't fetch events", "err", err.Error())
+		cfg.log.Error("couldn't fetch events", "err", err)
 		err = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocketCloseCodeFrom(err), ""))
 		if err != nil {
-			cfg.log.Error("couldn't push control message through websocket", "err", err.Error())
+			cfg.log.Error("couldn't push control message through websocket", "err", err)
 		}
 		return
 	}
@@ -845,7 +847,7 @@ func wsEventWriter(ctx context.Context, ws *websocket.Conn, cfg wsStreamConfig) 
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocketLeaseNotFound, ""))
 		if err != nil {
-			cfg.log.Error("couldn't push control message through websocket", "err", err.Error())
+			cfg.log.Error("couldn't push control message through websocket", "err", err)
 		}
 		return
 	}
