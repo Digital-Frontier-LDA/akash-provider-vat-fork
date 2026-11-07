@@ -1,18 +1,28 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"time"
 
+	"github.com/avast/retry-go/v4"
 	"github.com/boz/go-lifecycle"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	tpubsub "github.com/troian/pubsub"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	errorsmod "cosmossdk.io/errors"
 	"cosmossdk.io/log"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
+	sdkquery "github.com/cosmos/cosmos-sdk/types/query"
+	dv1 "pkg.akt.dev/go/node/deployment/v1"
 	dtypes "pkg.akt.dev/go/node/deployment/v1beta4"
 	mtypes "pkg.akt.dev/go/node/market/v1"
+	mvbeta "pkg.akt.dev/go/node/market/v1beta5"
 	apclient "pkg.akt.dev/go/provider/client"
 	provider "pkg.akt.dev/go/provider/v1"
 	"pkg.akt.dev/go/util/pubsub"
@@ -107,7 +117,7 @@ func NewService(
 	waiter waiter.OperatorWaiter,
 	cfg Config,
 ) (Service, error) {
-	log := session.Log().With("module", "provider-cluster", "cmp", "service")
+	log := session.Log().With("module", "provider-cluster")
 
 	lc := lifecycle.New()
 
@@ -139,7 +149,7 @@ func NewService(
 	activeHostnames := make(map[string]mtypes.LeaseID, len(allHostnames))
 	for _, v := range allHostnames {
 		activeHostnames[v.Hostname] = v.ID
-		log.Debug("found existing hostname", "hostname", v.Hostname, "id", v.ID)
+		log.Debug("found existing hostname", "hostname", v.Hostname, "lid", v.ID)
 	}
 	hostnames, err := newHostnameService(ctx, cfg, activeHostnames)
 	if err != nil {
@@ -318,10 +328,10 @@ func (s *service) run(ctx context.Context, deployments []ctypes.IDeployment) {
 
 	inventorych := bus.Sub(ptypes.PubSubTopicInventoryStatus)
 
-	for _, deployment := range deployments {
-		s.managers[deployment.LeaseID()] = newDeploymentManager(s, deployment, false)
-		s.updateDeploymentManagerGauge()
-	}
+	// The lease reconciliation stops with the service.
+	reconcileCtx, cancelReconcile := context.WithCancel(ctx)
+	defer cancelReconcile()
+	s.startDeploymentManagers(reconcileCtx, deployments)
 
 	signalch := make(chan struct{}, 1)
 
@@ -345,17 +355,17 @@ loop:
 		case ev := <-s.sub.Events():
 			switch ev := ev.(type) {
 			case event.ManifestReceived:
-				s.log.Info("manifest received", "lease", ev.LeaseID)
+				s.log.Info("manifest received", "lid", ev.LeaseID)
 
 				mgroup := ev.ManifestGroup()
 				if mgroup == nil {
-					s.log.Error("indeterminate manifest group", "lease", ev.LeaseID, "group-name", ev.Group.GroupSpec.Name)
+					s.log.Error("indeterminate manifest group", "lid", ev.LeaseID, "group_name", ev.Group.GroupSpec.Name)
 					break
 				}
 
 				reservation, err := s.inventory.lookup(ev.LeaseID.OrderID(), mgroup)
 				if err != nil {
-					s.log.Error("error looking up manifest", "err", err, "lease", ev.LeaseID, "group-name", mgroup.Name)
+					s.log.Error("error looking up manifest", "err", err, "lid", ev.LeaseID, "group_name", mgroup.Name)
 					break
 				}
 
@@ -368,7 +378,7 @@ loop:
 				key := ev.LeaseID
 				if manager := s.managers[key]; manager != nil {
 					if err := manager.update(deployment); err != nil {
-						s.log.Error("updating deployment", "err", err, "lease", ev.LeaseID, "group-name", mgroup.Name)
+						s.log.Error("updating deployment", "err", err, "lid", ev.LeaseID, "group_name", mgroup.Name)
 					}
 					break
 				}
@@ -381,11 +391,19 @@ loop:
 				s.teardownLease(ev.ID)
 			case *mtypes.EventLeaseReclaimStarted:
 				s.log.Info("lease reclamation started",
-					"lease", ev.ID,
+					"lid", ev.ID,
 					"reason", ev.Reason,
 					"deadline", ev.Deadline)
-				// Workloads continue running during the reclamation window.
-				// Teardown occurs when EventLeaseClosed is received after the window elapses.
+				// Workloads keep running during the reclamation window. The lease's manager
+				// arms a timer for the deadline and broadcasts MsgCloseBid once it elapses in
+				// block time; the resulting EventLeaseClosed drives teardown here.
+				if manager := s.managers[ev.ID]; manager != nil {
+					if err := manager.reclaim(ev.Deadline); err != nil {
+						s.log.Error("arming reclamation close", "err", err, "lid", ev.ID)
+					}
+				} else {
+					s.log.Warn("reclaim event for lease with no local manager", "lid", ev.ID)
+				}
 			}
 		case ch := <-s.statusch:
 			ch <- &apclient.ClusterStatus{
@@ -417,13 +435,13 @@ loop:
 			}
 			bus.Pub(msg, []string{ptypes.PubSubTopicClusterStatus}, tpubsub.WithRetain())
 		case dm := <-s.managerch:
-			s.log.Info("manager done", "lease", dm.deployment.LeaseID())
+			s.log.Info("manager done", "lid", dm.deployment.LeaseID())
 
 			// unreserve resources
 			if err := s.inventory.unreserve(dm.deployment.LeaseID().OrderID()); err != nil {
 				s.log.Error("unreserving inventory",
 					"err", err,
-					"lease", dm.deployment.LeaseID())
+					"lid", dm.deployment.LeaseID())
 			}
 
 			delete(s.managers, dm.deployment.LeaseID())
@@ -434,11 +452,11 @@ loop:
 		s.updateDeploymentManagerGauge()
 	}
 
-	s.log.Debug("draining deployment managers...", "qty", len(s.managers))
+	s.log.Debug("draining deployment managers...", "count", len(s.managers))
 	for _, manager := range s.managers {
 		if manager != nil {
 			manager := <-s.managerch
-			s.log.Debug("manager done", "lease", manager.deployment.LeaseID())
+			s.log.Debug("manager done", "lid", manager.deployment.LeaseID())
 		}
 	}
 
@@ -458,21 +476,218 @@ func (s *service) doCheckDeploymentExists(req checkDeploymentExistsRequest) {
 	close(req.responseCh)
 }
 
+// startDeploymentManagers resumes the deployments found in the cluster. Leases
+// that closed while the provider was down can leave namespaces and manifests
+// behind, so the leases in the cluster are then checked against the chain, in
+// the background so the provider does not wait for it. ctx stops that check.
+func (s *service) startDeploymentManagers(ctx context.Context, deployments []ctypes.IDeployment) {
+	managed := make(map[mtypes.LeaseID]bool, len(deployments))
+	for _, deployment := range deployments {
+		s.managers[deployment.LeaseID()] = newDeploymentManager(s, deployment, false)
+		managed[deployment.LeaseID()] = true
+		s.updateDeploymentManagerGauge()
+	}
+
+	go s.reconcileLeases(ctx, managed)
+}
+
 func (s *service) teardownLease(lid mtypes.LeaseID) {
 	if manager := s.managers[lid]; manager != nil {
 		if err := manager.teardown(); err != nil {
-			s.log.Error("tearing down lease deployment", "err", err, "lease", lid)
+			s.log.Error("tearing down lease deployment", "err", err, "lid", lid)
 		}
 		return
 	}
 
 	// unreserve resources if no manager present yet.
 	if lid.Provider == s.session.Provider().Owner {
-		s.log.Info("unreserving unmanaged order", "lease", lid)
+		s.log.Info("unreserving unmanaged order", "lid", lid)
 		err := s.inventory.unreserve(lid.OrderID())
 		if err != nil && !errors.Is(errReservationNotFound, err) {
-			s.log.Error("unreserve failed", "lease", lid, "err", err)
+			s.log.Error("unreserve failed", "lid", lid, "err", err)
 		}
+	}
+}
+
+const (
+	// leaseReconcilePageLimit is the number of leases read per chain query.
+	leaseReconcilePageLimit = 100
+	// leaseReconcileTimeout bounds one reconciliation pass.
+	leaseReconcileTimeout       = 5 * time.Minute
+	leaseReconcileRetryDelay    = 30 * time.Second
+	leaseReconcileMaxRetryDelay = 10 * time.Minute
+)
+
+var errLeasePaginationStalled = errors.New("lease pagination stalled")
+
+// reconcileLeases tears down what leases that closed while the provider was
+// down left in the cluster. It runs in the background, so startup does not
+// wait for the chain, and retries until a pass completes or ctx is done.
+// managed holds the leases whose deployment managers started with the service.
+// opts override the retry schedule.
+func (s *service) reconcileLeases(ctx context.Context, managed map[mtypes.LeaseID]bool, opts ...retry.Option) {
+	// Retries only stop once a pass completes or ctx is done, so there is no error to report.
+	_ = retry.Do(func() error {
+		return s.reconcileLeasesOnce(ctx, managed)
+	}, append([]retry.Option{
+		retry.Context(ctx),
+		// A lease left behind can keep its workloads running, so never give up.
+		retry.Attempts(0),
+		retry.Delay(leaseReconcileRetryDelay),
+		retry.MaxDelay(leaseReconcileMaxRetryDelay),
+		retry.DelayType(retry.BackOffDelay),
+		retry.OnRetry(func(_ uint, err error) {
+			if ctx.Err() == nil {
+				s.log.Error("lease reconciliation failed, retrying", "err", err)
+			}
+		}),
+	}, opts...)...)
+}
+
+// reconcileLeasesOnce matches the provider's leases in the cluster against the
+// chain. A lease that is not active is torn down only once the chain confirms
+// it closed: by its deployment manager if it has one, otherwise by removing
+// what it holds in the cluster. Leases the chain does not know are kept. The
+// pass fails when the cluster or the chain cannot be read, or a lease cannot
+// be confirmed or removed.
+func (s *service) reconcileLeasesOnce(ctx context.Context, managed map[mtypes.LeaseID]bool) error {
+	ctx, cancel := context.WithTimeout(ctx, leaseReconcileTimeout)
+	defer cancel()
+
+	lids, err := s.client.LeaseIDs(ctx)
+	if err != nil {
+		return err
+	}
+
+	owner := s.session.Provider().GetOwner()
+	own := make([]mtypes.LeaseID, 0, len(lids))
+	for _, lid := range lids {
+		if lid.Provider == owner {
+			own = append(own, lid)
+		}
+	}
+	if len(own) == 0 {
+		return nil
+	}
+
+	active, err := s.activeLeases(ctx, owner)
+	if err != nil {
+		return err
+	}
+
+	// Hostnames are reserved per deployment group, so count the leases of each
+	// group that are in the cluster or active on chain.
+	groupLeases := make(map[dv1.GroupID]int, len(active)+len(own))
+	for lid := range active {
+		groupLeases[lid.GroupID()]++
+	}
+	for _, lid := range own {
+		if _, exists := active[lid]; !exists {
+			groupLeases[lid.GroupID()]++
+		}
+	}
+
+	var errs error
+	for _, lid := range own {
+		if _, exists := active[lid]; exists {
+			continue
+		}
+
+		closed, err := s.closedLease(ctx, lid)
+		if err != nil {
+			errs = errors.Join(errs, err)
+			continue
+		}
+		if closed == nil {
+			continue
+		}
+
+		s.log.Info("tearing down closed lease", "lid", lid)
+		if managed[lid] {
+			// Its deployment manager tears it down, as for a lease closed at runtime.
+			if err := s.bus.Publish(closed); err != nil {
+				errs = errors.Join(errs, err)
+			}
+			continue
+		}
+		if err := s.removeUnmanagedLease(ctx, lid, groupLeases[lid.GroupID()] == 1); err != nil {
+			errs = errors.Join(errs, err)
+		}
+	}
+
+	return errs
+}
+
+// removeUnmanagedLease removes what a closed lease without a deployment manager
+// holds in the cluster, as a manager's teardown does. Its namespace and manifest
+// go last, so until everything else is gone the next pass finds the lease again.
+// Hostname reservations are held per deployment group, so they are released
+// only when the lease is the last of its group.
+func (s *service) removeUnmanagedLease(ctx context.Context, lid mtypes.LeaseID, lastOfGroup bool) error {
+	if err := errors.Join(
+		s.client.PurgeDeclaredHostnames(ctx, lid),
+		s.client.PurgeDeclaredIPs(ctx, lid),
+	); err != nil {
+		return err
+	}
+
+	var err error
+	if lastOfGroup {
+		err = s.hostnames.ReleaseHostnames(lid)
+	}
+
+	return errors.Join(err, s.client.TeardownLease(ctx, lid))
+}
+
+// activeLeases returns the provider's leases the chain reports active. Leases in
+// any other state, reclaiming ones included, are each checked by closedLease.
+func (s *service) activeLeases(ctx context.Context, provider string) (map[mtypes.LeaseID]struct{}, error) {
+	active := make(map[mtypes.LeaseID]struct{})
+	var key []byte
+	for {
+		resp, err := s.session.Client().Query().Market().Leases(ctx, &mvbeta.QueryLeasesRequest{
+			Filters:    mtypes.LeaseFilters{Provider: provider, State: mtypes.LeaseActive.String()},
+			Pagination: &sdkquery.PageRequest{Key: key, Limit: leaseReconcilePageLimit},
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, lease := range resp.Leases {
+			active[lease.Lease.ID] = struct{}{}
+		}
+
+		next := resp.GetPagination().GetNextKey()
+		if len(next) == 0 {
+			return active, nil
+		}
+		// A node that keeps returning the same page would never let the pass end.
+		if bytes.Equal(next, key) {
+			return nil, errLeasePaginationStalled
+		}
+		key = next
+	}
+}
+
+// closedLease returns the closure of a lease the chain reports closed, and nil
+// for a lease in any other state or that the chain does not know.
+func (s *service) closedLease(ctx context.Context, lid mtypes.LeaseID) (*mtypes.EventLeaseClosed, error) {
+	resp, err := s.session.Client().Query().Market().Lease(ctx, &mvbeta.QueryLeaseRequest{ID: lid})
+	if errorsmod.IsOf(err, mtypes.ErrLeaseNotFound) || status.Code(err) == codes.NotFound {
+		s.log.Info("keeping lease the chain does not know", "lid", lid)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resp.Lease.ID != lid {
+		return nil, fmt.Errorf("lease query returned a different ID: %s", resp.Lease.ID)
+	}
+
+	switch resp.Lease.State {
+	case mtypes.LeaseClosed, mtypes.LeaseInsufficientFunds:
+		return &mtypes.EventLeaseClosed{ID: lid, Reason: resp.Lease.Reason}, nil
+	default:
+		return nil, nil
 	}
 }
 

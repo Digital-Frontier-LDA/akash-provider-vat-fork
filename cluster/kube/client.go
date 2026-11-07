@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -37,6 +38,7 @@ import (
 
 	"github.com/akash-network/provider/cluster"
 	"github.com/akash-network/provider/cluster/kube/builder"
+	"github.com/akash-network/provider/cluster/kube/clientcommon"
 	kubeclienterrors "github.com/akash-network/provider/cluster/kube/errors"
 	"github.com/akash-network/provider/cluster/kube/gateway"
 	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
@@ -138,14 +140,14 @@ func NewClient(ctx context.Context, log log.Logger, ns string) (Client, error) {
 		}
 		gatewayImpl = impl
 		log.Info("initialized gateway provider",
-			"provider", impl.Name())
+			"gateway_provider", impl.Name())
 	}
 
 	log.Info("initializing kube client",
-		"ingress-mode", gwCfg.IngressMode,
-		"gateway-name", gwCfg.Name,
-		"gateway-namespace", gwCfg.Namespace,
-		"gateway-provider", gwCfg.Provider)
+		"ingress_mode", gwCfg.IngressMode,
+		"gateway_name", gwCfg.Name,
+		"gateway_namespace", gwCfg.Namespace,
+		"gateway_provider", gwCfg.Provider)
 
 	cl := &client{
 		ctx:               ctx,
@@ -153,7 +155,7 @@ func NewClient(ctx context.Context, log log.Logger, ns string) (Client, error) {
 		ac:                ac,
 		dc:                dc,
 		ns:                ns,
-		log:               log.With("client", "kube"),
+		log:               log,
 		kubeContentConfig: kubecfg,
 		ingressMode:       ingressMode,
 		gatewayName:       gwCfg.Name,
@@ -200,6 +202,8 @@ func (c *client) GetDeployment(ctx context.Context, dID dtypes.DeploymentID) ([]
 }
 
 func (c *client) GetManifestGroup(ctx context.Context, lID mtypes.LeaseID) (bool, crd.ManifestGroup, error) {
+	log := c.log.With("lid", lID)
+
 	leaseNamespace := builder.LidNS(lID)
 
 	obj, err := wrapKubeCall("manifests-get", func() (*crd.Manifest, error) {
@@ -208,7 +212,7 @@ func (c *client) GetManifestGroup(ctx context.Context, lID mtypes.LeaseID) (bool
 
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			c.log.Info("CRD manifest not found", "lease-ns", leaseNamespace)
+			log.Info("CRD manifest not found", "ns", leaseNamespace)
 			return false, crd.ManifestGroup{}, nil
 		}
 
@@ -237,6 +241,57 @@ func (c *client) Deployments(ctx context.Context) ([]ctypes.IDeployment, error) 
 	}
 
 	return deployments, nil
+}
+
+// LeaseIDs returns the leases that have a namespace or a manifest in the
+// cluster. Namespaces Kubernetes is already deleting are left out.
+func (c *client) LeaseIDs(ctx context.Context) ([]mtypes.LeaseID, error) {
+	namespaces, err := wrapKubeCall("namespaces-list", func() (*corev1.NamespaceList, error) {
+		return c.kc.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+			LabelSelector: builder.AkashManagedLabelName + "=true",
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	manifests, err := wrapKubeCall("manifests-list", func() (*crd.ManifestList, error) {
+		return c.ac.AkashV2beta2().Manifests(c.ns).List(ctx, metav1.ListOptions{})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[mtypes.LeaseID]struct{}, len(namespaces.Items)+len(manifests.Items))
+	lids := make([]mtypes.LeaseID, 0, len(namespaces.Items)+len(manifests.Items))
+	add := func(lid mtypes.LeaseID) {
+		if _, exists := seen[lid]; !exists {
+			seen[lid] = struct{}{}
+			lids = append(lids, lid)
+		}
+	}
+
+	for _, ns := range namespaces.Items {
+		// Deleting a namespace that is already being deleted fails with a conflict.
+		if ns.DeletionTimestamp != nil {
+			continue
+		}
+		// Managed namespaces without lease labels, like the provider's own, hold no lease.
+		if lid, err := clientcommon.RecoverLeaseIDFromLabels(ns.Labels); err == nil {
+			add(lid)
+		}
+	}
+
+	for _, manifest := range manifests.Items {
+		lid, err := manifest.Spec.LeaseID.FromCRD()
+		if err != nil {
+			c.log.Error("manifest names no lease", "ns", manifest.Name, "err", err)
+			continue
+		}
+		add(lid)
+	}
+
+	return lids, nil
 }
 
 type deploymentService struct {
@@ -473,6 +528,8 @@ func (c *client) interconnectRoCENetworks(ctx context.Context, namespace string)
 }
 
 func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err error) {
+	log := c.log.With("lid", deployment.LeaseID())
+
 	var settings builder.Settings
 	var valid bool
 
@@ -489,11 +546,11 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 
 	if cdeployment, err = builder.ClusterDeploymentFromDeployment(deployment); err != nil {
 		if cdeployment != nil {
-			tMani := builder.BuildManifest(c.log, settings, c.ns, cdeployment)
+			tMani := builder.BuildManifest(log, settings, c.ns, cdeployment)
 
 			if cr, er := tMani.Create(); er == nil {
 				data, _ := json.Marshal(cr)
-				c.log.Error(fmt.Sprintf("debug manifest %s", string(data)))
+				log.Error(fmt.Sprintf("debug manifest %s", string(data)))
 			}
 		}
 
@@ -511,7 +568,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 	// namespace is the explicit opt-out.
 	if deploymentNeedsRoCENetworks(cdeployment) {
 		if settings.InterconnectRoCENetworksNamespace == "" {
-			c.log.Info("RoCE rail network attachment disabled (empty namespace); interconnect pods will not reach the rail fabric", "lease", lid)
+			log.Info("RoCE rail network attachment disabled (empty namespace); interconnect pods will not reach the rail fabric")
 		} else {
 			networks, nerr := c.interconnectRoCENetworks(ctx, settings.InterconnectRoCENetworksNamespace)
 			if nerr != nil {
@@ -528,24 +585,14 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		tmpErr := err
 
 		if recover() != nil {
-			c.log.Error(fmt.Sprintf("recovered from panic: \n%s", string(debug.Stack())))
+			log.Error(fmt.Sprintf("recovered from panic: \n%s", string(debug.Stack())))
 			err = kubeclienterrors.ErrInternalError
 		}
 
 		if tmpErr != nil || err != nil {
-			var dArgs []any
-			var dMsg string
+			log.Error("unable to deploy", "err", err)
 
-			applyMsgLog := func(msg string, arg any) {
-				dMsg += msg
-				dArgs = append(dArgs, arg)
-			}
-
-			applyMsgLog("unable to deploy lid=%s. last known state:\n", lid)
-
-			c.log.Error(fmt.Sprintf(dMsg, dArgs...))
-
-			c.log.Info("attempting recover objects to previous state")
+			log.Info("attempting recover objects to previous state")
 			po.recover(ctx, c.kc, c.ac)
 		}
 	}()
@@ -554,7 +601,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		services: make([]*deploymentService, 0, len(group.Services)),
 	}
 
-	applies.cmanifest = builder.BuildManifest(c.log, settings, c.ns, cdeployment)
+	applies.cmanifest = builder.BuildManifest(log, settings, c.ns, cdeployment)
 
 	po.omani, err = c.ac.AkashV2beta2().Manifests(c.ns).Get(ctx, applies.cmanifest.Name(), metav1.GetOptions{})
 	metricsutils.IncCounterVecWithLabelValuesFiltered(kubeCallsCounter, "akash-manifests-get", err, kerrors.IsNotFound)
@@ -610,7 +657,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		}
 
 		if err != nil {
-			c.log.Error("applying manifest", "err", err, "lease", lid)
+			log.Error("applying manifest", "err", err)
 			return err
 		}
 	}
@@ -636,7 +683,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 	servicesWithPermissions := make([]string, 0)
 
 	for svcIdx := range group.Services {
-		workload, err := builder.NewWorkloadBuilder(c.log, settings, cdeployment, currManifest, svcIdx)
+		workload, err := builder.NewWorkloadBuilder(log, settings, cdeployment, currManifest, svcIdx)
 		if err != nil {
 			return err
 		}
@@ -665,19 +712,19 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 
 		// Create ServiceAccount, Role, and RoleBinding if permissions are defined
 		if workload.HasPermissions() {
-			c.log.Info("creating ServiceAccount, Role, and RoleBinding for service", "lease", lid, "service", service.Name, "permissions", workload.GetPermissions())
+			log.Info("creating ServiceAccount, Role, and RoleBinding for service", "service", service.Name, "permissions", workload.GetPermissions())
 			svc.serviceAccount = builder.BuildServiceAccount(workload)
 			svc.role = builder.BuildRole(workload)
 			svc.roleBinding = builder.BuildRoleBinding(workload)
 			servicesWithPermissions = append(servicesWithPermissions, service.Name)
 		} else {
-			c.log.Debug("skipping ServiceAccount creation - no permissions defined", "lease", lid, "service", service.Name)
+			log.Debug("skipping ServiceAccount creation - no permissions defined", "service", service.Name)
 		}
 
 		applies.services = append(applies.services, svc)
 
 		if len(service.Expose) == 0 {
-			c.log.Debug("lease does not have services (no expose configuration provided)", "lease", lid, "service", service.Name)
+			log.Debug("lease does not have services (no expose configuration provided)", "service", service.Name)
 			continue
 		}
 
@@ -687,18 +734,18 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 
 	po.nns, po.uns, po.ons, err = applyNS(ctx, c.kc, applies.ns)
 	if err != nil {
-		c.log.Error("applying namespace", "err", err, "lease", lid)
+		log.Error("applying namespace", "err", err)
 		return err
 	}
 
 	po.nNetPolicies, po.uNetPolicies, po.oNetPolicies, err = applyNetPolicies(ctx, c.kc, applies.netPol)
 	if err != nil {
-		c.log.Error("applying namespace network policies", "err", err, "lease", lid)
+		log.Error("applying namespace network policies", "err", err)
 		return err
 	}
 
 	if err = cleanupStaleResources(ctx, c.kc, lid, group, servicesWithPermissions); err != nil {
-		c.log.Error("cleaning stale resources", "err", err, "lease", lid)
+		log.Error("cleaning stale resources", "err", err)
 		return err
 	}
 
@@ -744,7 +791,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		if applyObjs.serviceAccount != nil {
 			nobj, uobj, oobj, err := applyServiceAccount(ctx, c.kc, applyObjs.serviceAccount)
 			if err != nil {
-				c.log.Error("applying service account", "err", err, "lease", lid, "service", service.Name)
+				log.Error("applying service account", "err", err, "service", service.Name)
 				return err
 			}
 
@@ -762,7 +809,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		if applyObjs.role != nil {
 			nobj, uobj, oobj, err := applyRole(ctx, c.kc, applyObjs.role)
 			if err != nil {
-				c.log.Error("applying role", "err", err, "lease", lid, "service", service.Name)
+				log.Error("applying role", "err", err, "service", service.Name)
 				return err
 			}
 
@@ -780,7 +827,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		if applyObjs.roleBinding != nil {
 			nobj, uobj, oobj, err := applyRoleBinding(ctx, c.kc, applyObjs.roleBinding)
 			if err != nil {
-				c.log.Error("applying role binding", "err", err, "lease", lid, "service", service.Name)
+				log.Error("applying role binding", "err", err, "service", service.Name)
 				return err
 			}
 
@@ -798,7 +845,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		if applyObjs.credentials != nil {
 			nobj, uobj, obj, err := applyServiceCredentials(ctx, c.kc, applyObjs.credentials)
 			if err != nil {
-				c.log.Error("applying credentials", "err", err, "lease", lid, "service", service.Name)
+				log.Error("applying credentials", "err", err, "service", service.Name)
 				return err
 			}
 
@@ -816,7 +863,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		if applyObjs.statefulSet != nil {
 			nobj, uobj, oobj, err := applyStatefulSet(ctx, c.kc, applyObjs.statefulSet)
 			if err != nil {
-				c.log.Error("applying statefulSet", "err", err, "lease", lid, "service", service.Name)
+				log.Error("applying statefulSet", "err", err, "service", service.Name)
 				return err
 			}
 
@@ -834,7 +881,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		if applyObjs.deployment != nil {
 			nobj, uobj, oobj, err := applyDeployment(ctx, c.kc, applyObjs.deployment)
 			if err != nil {
-				c.log.Error("applying deployment", "err", err, "lease", lid, "service", service.Name)
+				log.Error("applying deployment", "err", err, "service", service.Name)
 				return err
 			}
 
@@ -852,7 +899,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		if lsvc := applyObjs.localService; lsvc != nil && lsvc.Any() {
 			nobj, uobj, oobj, err := applyService(ctx, c.kc, lsvc)
 			if err != nil {
-				c.log.Error("applying local service", "err", err, "lease", lid, "service", service.Name)
+				log.Error("applying local service", "err", err, "service", service.Name)
 				return err
 			}
 
@@ -870,7 +917,7 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		if gsvc := applyObjs.globalService; gsvc != nil && gsvc.Any() {
 			nobj, uobj, oobj, err := applyService(ctx, c.kc, gsvc)
 			if err != nil {
-				c.log.Error("applying global service", "err", err, "lease", lid, "service", service.Name)
+				log.Error("applying global service", "err", err, "service", service.Name)
 				return err
 			}
 
@@ -890,14 +937,16 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 }
 
 func (c *client) TeardownLease(ctx context.Context, lid mtypes.LeaseID) error {
-	c.log.Info("tearing down lease", "lease", lid)
+	log := c.log.With("lid", lid)
+
+	log.Info("tearing down lease")
 
 	_, result := wrapKubeCall("namespaces-delete", func() (interface{}, error) {
 		return nil, c.kc.CoreV1().Namespaces().Delete(ctx, builder.LidNS(lid), metav1.DeleteOptions{})
 	})
 
 	if result != nil {
-		c.log.Error("teardown lease: unable to delete namespace", "ns", builder.LidNS(lid), "err", result)
+		log.Error("teardown lease: unable to delete namespace", "ns", builder.LidNS(lid), "err", result)
 		if kerrors.IsNotFound(result) {
 			result = nil
 		}
@@ -907,10 +956,13 @@ func (c *client) TeardownLease(ctx context.Context, lid mtypes.LeaseID) error {
 	})
 
 	if err != nil {
-		c.log.Error("teardown lease: unable to delete manifest", "ns", builder.LidNS(lid), "err", err)
+		log.Error("teardown lease: unable to delete manifest", "ns", builder.LidNS(lid), "err", err)
+		if kerrors.IsNotFound(err) {
+			err = nil
+		}
 	}
 
-	return result
+	return errors.Join(result, err)
 }
 
 func kubeSelectorForLease(dst *strings.Builder, lID mtypes.LeaseID) {
@@ -1004,6 +1056,8 @@ func (c *client) LeaseEvents(ctx context.Context, lid mtypes.LeaseID, services s
 
 func (c *client) LeaseLogs(ctx context.Context, lid mtypes.LeaseID,
 	services string, follow bool, tailLines *int64) ([]*ctypes.ServiceLog, error) {
+	log := c.log.With("lid", lid)
+
 	if err := c.leaseExists(ctx, lid); err != nil {
 		return nil, err
 	}
@@ -1013,13 +1067,13 @@ func (c *client) LeaseLogs(ctx context.Context, lid mtypes.LeaseID,
 		listOpts.LabelSelector = fmt.Sprintf(builder.AkashManifestServiceLabelName+" in (%s)", services)
 	}
 
-	c.log.Info("filtering pods", "labelSelector", listOpts.LabelSelector)
+	log.Info("filtering pods", "label_selector", listOpts.LabelSelector)
 
 	pods, err := wrapKubeCall("pods-list", func() (*corev1.PodList, error) {
 		return c.kc.CoreV1().Pods(builder.LidNS(lid)).List(ctx, listOpts)
 	})
 	if err != nil {
-		c.log.Error("listing pods", "err", err)
+		log.Error("listing pods", "err", err)
 		return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 	streams := make([]*ctypes.ServiceLog, len(pods.Items))
@@ -1033,7 +1087,7 @@ func (c *client) LeaseLogs(ctx context.Context, lid mtypes.LeaseID,
 		})
 
 		if err != nil {
-			c.log.Error("get pod logs", "err", err)
+			log.Error("get pod logs", "err", err)
 			return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 		}
 		streams[i] = cluster.NewServiceLog(pod.Name, stream)
@@ -1042,6 +1096,8 @@ func (c *client) LeaseLogs(ctx context.Context, lid mtypes.LeaseID,
 }
 
 func (c *client) ForwardedPortStatus(ctx context.Context, leaseID mtypes.LeaseID) (map[string][]apclient.ForwardedPortStatus, error) {
+	log := c.log.With("lid", leaseID)
+
 	settingsI := ctx.Value(builder.SettingsKey)
 	if nil == settingsI {
 		return nil, kubeclienterrors.ErrNotConfiguredWithSettings
@@ -1055,7 +1111,7 @@ func (c *client) ForwardedPortStatus(ctx context.Context, leaseID mtypes.LeaseID
 		return c.kc.CoreV1().Services(builder.LidNS(leaseID)).List(ctx, metav1.ListOptions{})
 	})
 	if err != nil {
-		c.log.Error("list services", "err", err)
+		log.Error("list services", "err", err)
 		return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 
@@ -1145,6 +1201,8 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (map[strin
 }
 
 func (c *client) ServiceStatus(ctx context.Context, lid mtypes.LeaseID, name string) (*apclient.ServiceStatus, error) {
+	log := c.log.With("lid", lid)
+
 	if err := c.leaseExists(ctx, lid); err != nil {
 		return nil, err
 	}
@@ -1155,7 +1213,7 @@ func (c *client) ServiceStatus(ctx context.Context, lid mtypes.LeaseID, name str
 	})
 
 	if err != nil {
-		c.log.Error("CRD manifest not found", "lease-ns", builder.LidNS(lid), "name", name)
+		log.Error("CRD manifest not found", "ns", builder.LidNS(lid), "name", name)
 		return nil, kubeclienterrors.ErrNoManifestForLease
 	}
 
@@ -1187,17 +1245,17 @@ func (c *client) ServiceStatus(ctx context.Context, lid mtypes.LeaseID, name str
 	}
 
 	if isDeployment {
-		c.log.Debug("get deployment", "lease-ns", builder.LidNS(lid), "name", name)
+		log.Debug("get deployment", "ns", builder.LidNS(lid), "name", name)
 		deployment, err := wrapKubeCall("deployments-get", func() (*appsv1.Deployment, error) {
 			return c.kc.AppsV1().Deployments(builder.LidNS(lid)).Get(ctx, name, metav1.GetOptions{})
 		})
 
 		if err != nil {
-			c.log.Error("deployment get", "err", err)
+			log.Error("deployment get", "err", err)
 			return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 		}
 		if deployment == nil {
-			c.log.Error("no deployment found", "name", name)
+			log.Error("no deployment found", "name", name)
 			return nil, kubeclienterrors.ErrNoDeploymentForLease
 		}
 
@@ -1212,17 +1270,17 @@ func (c *client) ServiceStatus(ctx context.Context, lid mtypes.LeaseID, name str
 			AvailableReplicas:  deployment.Status.AvailableReplicas,
 		}
 	} else {
-		c.log.Debug("get statefulsets", "lease-ns", builder.LidNS(lid), "name", name)
+		log.Debug("get statefulsets", "ns", builder.LidNS(lid), "name", name)
 		statefulset, err := wrapKubeCall("statefulsets-get", func() (*appsv1.StatefulSet, error) {
 			return c.kc.AppsV1().StatefulSets(builder.LidNS(lid)).Get(ctx, name, metav1.GetOptions{})
 		})
 
 		if err != nil {
-			c.log.Error("statefulsets get", "err", err)
+			log.Error("statefulsets get", "err", err)
 			return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 		}
 		if statefulset == nil {
-			c.log.Error("no statefulsets found", "name", name)
+			log.Error("no statefulsets found", "name", name)
 			return nil, kubeclienterrors.ErrNoDeploymentForLease
 		}
 
@@ -1270,7 +1328,7 @@ exposeCheckLoop:
 		return nil, fmt.Errorf("%w: service %q", kubeclienterrors.ErrNoServiceForLease, name)
 	}
 
-	c.log.Debug("service result", "lease-ns", builder.LidNS(lid), "has-hostnames", hasHostnames)
+	log.Debug("service result", "ns", builder.LidNS(lid), "has_hostnames", hasHostnames)
 
 	if hasHostnames {
 		labelSelector := &strings.Builder{}
@@ -1283,7 +1341,7 @@ exposeCheckLoop:
 		})
 
 		if err != nil {
-			c.log.Error("provider hosts get", "err", err)
+			log.Error("provider hosts get", "err", err)
 			return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 		}
 
@@ -1299,6 +1357,8 @@ exposeCheckLoop:
 }
 
 func (c *client) leaseExists(ctx context.Context, lid mtypes.LeaseID) error {
+	log := c.log.With("lid", lid)
+
 	_, err := wrapKubeCall("namespace-get", func() (*corev1.Namespace, error) {
 		return c.kc.CoreV1().Namespaces().Get(ctx, builder.LidNS(lid), metav1.GetOptions{})
 	})
@@ -1308,7 +1368,7 @@ func (c *client) leaseExists(ctx context.Context, lid mtypes.LeaseID) error {
 			return kubeclienterrors.ErrLeaseNotFound
 		}
 
-		c.log.Error("namespaces get", "err", err)
+		log.Error("namespaces get", "err", err)
 		return fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 
@@ -1316,6 +1376,8 @@ func (c *client) leaseExists(ctx context.Context, lid mtypes.LeaseID) error {
 }
 
 func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) (map[string]*apclient.ServiceStatus, error) {
+	log := c.log.With("lid", lid)
+
 	if err := c.leaseExists(ctx, lid); err != nil {
 		return nil, err
 	}
@@ -1325,7 +1387,7 @@ func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) (m
 	})
 
 	if err != nil {
-		c.log.Error("deployments list", "err", err)
+		log.Error("deployments list", "err", err)
 		return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 
@@ -1334,7 +1396,7 @@ func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) (m
 	})
 
 	if err != nil {
-		c.log.Error("statefulsets list", "err", err)
+		log.Error("statefulsets list", "err", err)
 		return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 
@@ -1371,7 +1433,7 @@ func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) (m
 	}
 
 	if len(serviceStatus) == 0 {
-		c.log.Info("No deployments found for", "lease namespace", builder.LidNS(lid))
+		log.Info("No deployments found for", "ns", builder.LidNS(lid))
 		return nil, kubeclienterrors.ErrNoDeploymentForLease
 	}
 
