@@ -185,7 +185,7 @@ func newInventoryService(
 			is.availableExternalPorts -= n
 		} else {
 			is.log.Error("external port accounting underflow at startup",
-				"order", res.OrderID(), "need", n, "available", is.availableExternalPorts)
+				"oid", res.OrderID(), "need", n, "available", is.availableExternalPorts)
 			is.availableExternalPorts = 0
 		}
 
