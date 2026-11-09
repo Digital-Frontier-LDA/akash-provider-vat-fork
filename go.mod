@@ -1,6 +1,6 @@
 module github.com/akash-network/provider
 
-go 1.26.2
+go 1.26.10
 
 require (
 	cosmossdk.io/errors v1.0.2
@@ -15,8 +15,6 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-acme/lego/v4 v4.34.0
 	github.com/go-andiamo/splitter v1.2.5
-	github.com/go-logr/logr v1.4.4
-	github.com/go-logr/zapr v1.3.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/context v1.1.2
@@ -53,8 +51,8 @@ require (
 	k8s.io/code-generator v0.34.1
 	k8s.io/kubectl v0.33.3
 	k8s.io/utils v0.0.0-20260108192941-914a6e750570
-	pkg.akt.dev/go v0.4.5
-	pkg.akt.dev/go/cli v0.2.4
+	pkg.akt.dev/go v0.4.8
+	pkg.akt.dev/go/cli v0.2.5-rc0
 	pkg.akt.dev/go/sdl v0.4.5
 	pkg.akt.dev/node v1.2.2
 	pkg.akt.dev/node/v2 v2.1.0
@@ -68,6 +66,8 @@ retract (
 	v0.11.0
 	v0.6.5
 	v0.6.0
+	v0.4.10-rc0
+	v0.4.7-rc0
 )
 
 replace (
@@ -225,10 +225,11 @@ require (
 	github.com/getsentry/sentry-go v0.35.0 // indirect
 	github.com/go-errors/errors v1.5.1 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.6 // indirect
 	github.com/go-kit/kit v0.13.0 // indirect
 	github.com/go-kit/log v0.2.1 // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
+	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-openapi/jsonpointer v0.21.2 // indirect
@@ -288,7 +289,7 @@ require (
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.13-0.20220915233716-71ac16282d12 // indirect
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.6.0 // indirect
-	github.com/klauspost/compress v1.18.5 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/knadh/koanf/parsers/yaml v0.1.0 // indirect

@@ -13,10 +13,83 @@ defaults:
     shell: bash
 
 jobs:
-  crd-e2e:
+  # The e2e suites are split into shards that run in parallel, each on its own
+  # core-e2e runner and kind cluster. The E2E_SHARDS repository variable sets
+  # how many (default 3); TestIntegrationTestSuite balances the suites across
+  # them by their estimated run times. build-image, build-bins and
+  # release-dry-run use the same core-e2e runners, so shards beyond what the
+  # pool has free wait for a runner.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      total: ${{ steps.plan.outputs.total }}
+    steps:
+      - name: Plan e2e shards
+        id: plan
+        env:
+          E2E_SHARDS: ${{ vars.E2E_SHARDS || '3' }}
+        run: |
+          # each shard takes a runner; the cap keeps a typo from queueing dozens
+          max=10
+          if ! [[ "$E2E_SHARDS" =~ ^[1-9][0-9]?$ ]] || (( E2E_SHARDS > max )); then
+            echo "::error::E2E_SHARDS must be a whole number from 1 to $max, got '$E2E_SHARDS'"
+            exit 1
+          fi
+          echo "total=$E2E_SHARDS" >> "$GITHUB_OUTPUT"
+          echo "shards=[$(seq "$E2E_SHARDS" | paste -sd, -)]" >> "$GITHUB_OUTPUT"
+          echo "running e2e in $E2E_SHARDS shard(s)"
+
+  # Builds the provider image once for all shards, instead of each shard
+  # spending ~10 min building its own.
+  build-image:
+    runs-on: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'ubuntu-24.04' || 'core-e2e' }}
+    steps:
+      - name: Cleanup build folder
+        run: |
+          sudo rm -rf ./* || true
+          sudo rm -rf ./.??* || true
+          sudo rm -rf "$HOME/go/pkg/mod" || true
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Setup environment
+        uses: ./.github/actions/setup-ubuntu
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build provider image
+        run: make docker-image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Save provider image
+        run: |
+          arch=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+          docker save "ghcr.io/akash-network/provider:latest-$arch" -o "$RUNNER_TEMP/provider-image.tar"
+      - name: Upload provider image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: provider-image
+          path: ${{ runner.temp }}/provider-image.tar
+          # re-running only failed shards reuses this artifact, so keep it past
+          # a weekend
+          retention-days: 7
+          # re-running all jobs uploads it again
+          overwrite: true
+          if-no-files-found: error
+
+  e2e:
+    name: e2e (shard ${{ matrix.shard }}/${{ needs.plan.outputs.total }})
+    needs:
+      - plan
+      - build-image
+    runs-on: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'ubuntu-24.04' || 'core-e2e' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     env:
       KIND_NAME: kube
-    runs-on: ${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'ubuntu-24.04' || 'core-e2e' }}
     steps:
       - name: Cleanup build folder
         run: |
@@ -38,6 +111,33 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config make direnv unzip lz4 wget curl jq pv coreutils libudev-dev
+      - name: Install GitHub CLI
+        # make akt verifies the akt installer with `gh attestation verify
+        # --signer-workflow` (gh >= 2.51). gh is preinstalled only on
+        # GitHub-hosted runners and Ubuntu's own package is too old, so use
+        # GitHub's apt repository.
+        shell: bash
+        run: |
+          # gh already capable (GitHub-hosted image, or a self-hosted runner
+          # that ran this before): skip the repo setup, but still upgrade gh
+          # from the package lists the previous step refreshed.
+          # No grep -q: with pipefail, an early grep exit can SIGPIPE gh.
+          if gh attestation verify --help 2>/dev/null |
+              grep -- --signer-workflow >/dev/null; then
+            sudo apt-get install -y --only-upgrade gh
+            gh --version
+            exit 0
+          fi
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          out=$(mktemp)
+          wget -nv -O "$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg
+          sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg < "$out" > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          sudo mkdir -p -m 755 /etc/apt/sources.list.d
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y gh
+          gh --version
       - name: Detect required Go version
         working-directory: "${{ env.GOPATH }}/src/github.com/akash-network/provider"
         run: |
@@ -95,16 +195,35 @@ jobs:
       - name: Fetch kind version from go modules
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
         run: echo "KIND_VERSION=$(go list -mod=readonly -m -f '{{ .Version }}' sigs.k8s.io/kind)" >> "$GITHUB_ENV"
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Go mod tidy
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
         run: go mod tidy
+      - name: Build wasmvm libs
+        # The e2e test binary links wasmvm through cgo (wasmvm.go). Building
+        # the provider image used to fetch the libs; it now runs in build-image.
+        working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
+        run: make wasmvm-libs
       - name: Make node scripts executable
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
         run: make chmod-akash-scripts
+      - name: Download provider image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: provider-image
+          path: ${{ runner.temp }}/provider-image
+      - name: Load provider image
+        run: |
+          arch=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+          image="ghcr.io/akash-network/provider:latest-$arch"
+          loaded=$(docker load -i "$RUNNER_TEMP/provider-image/provider-image.tar")
+          rm -rf "$RUNNER_TEMP/provider-image"
+          echo "$loaded"
+          # check the artifact itself had the tag: an older image with the same
+          # tag may still be on this runner
+          if ! grep -qxF "Loaded image: $image" <<< "$loaded"; then
+            echo "::error::the provider-image artifact has no $image; was it built on another architecture?"
+            exit 1
+          fi
       - name: Setup kind
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
@@ -123,6 +242,10 @@ jobs:
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider/_run/kube
         run: |
           KUSTOMIZE_INSTALLS=akash-operator-inventory make kube-cluster-setup-e2e-ci
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # the provider image comes prebuilt from build-image
+          SKIP_BUILD: "true"
       - name: Setup K8S ingress
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider/_run/kube
         run: |
@@ -150,8 +273,32 @@ jobs:
         run: cat "$GITHUB_WORKSPACE/env_run.backup" > "$GITHUB_ENV"
       - name: Run E2E Tests
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
+        env:
+          E2E_SHARD_INDEX: ${{ matrix.shard }}
+          E2E_SHARD_TOTAL: ${{ needs.plan.outputs.total }}
         run: |
-          make test-e2e-integration
+          set -o pipefail
+          make test-e2e-integration 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+      - name: Report suite durations
+        # feeds the suite estimates in integration/e2e_test.go
+        if: always()
+        env:
+          SHARD: ${{ matrix.shard }}
+          TOTAL: ${{ needs.plan.outputs.total }}
+        run: |
+          log="$RUNNER_TEMP/e2e.log"
+          pattern='^    --- (PASS|FAIL|SKIP): TestIntegrationTestSuite/([^/ ]+) \(([0-9.]+s)\)$'
+          {
+            echo "### e2e shard $SHARD/$TOTAL"
+            echo
+            if [[ -f "$log" ]] && grep -qE "$pattern" "$log"; then
+              echo "| Suite | Result | Duration |"
+              echo "| --- | --- | --- |"
+              sed -nE "s#$pattern#| \\2 | \\1 | \\3 |#p" "$log"
+            else
+              echo "No suite results, see the Run E2E Tests step."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Print operator inventory logs
         if: always()
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider/_run/kube
@@ -163,6 +310,9 @@ jobs:
         run: |
           kubectl -n akash-services logs -l app.kubernetes.io/part-of=provider,app.kubernetes.io/component=operator,app.kubernetes.io/instance=inventory-hardware-discovery,app.kubernetes.io/name=inventory
       - name: Run K8s Tests
+        # once per run; TestIntegrationTestSuite gives shard 1 less suite work
+        # to make room for them
+        if: matrix.shard == 1
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
         run: |
           make test-k8s-integration
@@ -171,7 +321,11 @@ jobs:
         run: |
           kubectl get ns,pods,ingress,svc -A
 
+      # DF: tests.yaml `coverage` downloads this exact artifact. Shards would
+      # each produce one under the same name, so only shard 1 does, as with
+      # the K8s tests above.
       - name: Generate complete coverage against the configured integration cluster
+        if: matrix.shard == 1
         working-directory: ${{ env.GOPATH }}/src/github.com/akash-network/provider
         env:
           TEST_INTEGRATION: 'true'
@@ -181,6 +335,7 @@ jobs:
           test "$(head -n 1 .cache/tests/coverage.txt)" = 'mode: atomic'
           printf '%s\n' "$GITHUB_SHA" > .cache/tests/coverage-source.txt
       - name: Preserve exact-source coverage for its original upload check
+        if: matrix.shard == 1
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: provider-complete-coverage-${{ github.run_id }}-${{ github.run_attempt }}
@@ -190,3 +345,27 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 2
+
+  # The required status check for e2e. It runs even when the jobs above fail or
+  # are skipped, since a skipped required check counts as passed, and passes
+  # only when all of them succeeded.
+  crd-e2e:
+    if: always()
+    needs:
+      - plan
+      - build-image
+      - e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check e2e results
+        env:
+          PLAN: ${{ needs.plan.result }}
+          BUILD: ${{ needs.build-image.result }}
+          E2E: ${{ needs.e2e.result }}
+        run: |
+          echo "plan: $PLAN, build-image: $BUILD, e2e: $E2E"
+          if [[ "$PLAN" != success || "$BUILD" != success || "$E2E" != success ]]; then
+            echo "::error::e2e did not pass (plan: $PLAN, build-image: $BUILD, e2e: $E2E)"
+            exit 1
+          fi

@@ -57,9 +57,15 @@ ldflags := -X github.com/akash-network/provider/version.Name=provider-services \
 # upstream version -X pattern above. DF_PKG is the fork module path + /df-telemetry.
 DF_PKG                 := $(shell head -1 go.mod | awk '{print $$2}')/df-telemetry
 DF_UPSTREAM_TAG        := $(shell cat UPSTREAM_TAG)
+# The upstream base commit: the df-base/<tag> marker if this checkout has it,
+# else the upstream tag itself, else "unknown" (doc.go's default). Never empty:
+# an empty -X overrides the default and every event then carries a blank
+# provider_upstream_commit. That is what a bumped UPSTREAM_TAG did before its
+# df-base/<tag> marker existed (#49).
+DF_UPSTREAM_COMMIT     := $(or $(shell git rev-parse --short df-base/$(DF_UPSTREAM_TAG) 2>/dev/null),$(shell git rev-parse --short $(DF_UPSTREAM_TAG)^{commit} 2>/dev/null),unknown)
 GO_LDFLAGS_DF          := \
 -X '$(DF_PKG).Commit=$(GIT_HEAD_COMMIT_SHORT)' \
--X '$(DF_PKG).UpstreamCommit=$(shell git rev-parse --short df-base/$(DF_UPSTREAM_TAG) 2>/dev/null)' \
+-X '$(DF_PKG).UpstreamCommit=$(DF_UPSTREAM_COMMIT)' \
 -X '$(DF_PKG).UpstreamVersion=$(DF_UPSTREAM_TAG)'
 ldflags += $(GO_LDFLAGS_DF)
 

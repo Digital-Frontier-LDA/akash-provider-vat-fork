@@ -65,6 +65,7 @@ import (
 	"github.com/akash-network/provider/session"
 	"github.com/akash-network/provider/tools/certissuer"
 	"github.com/akash-network/provider/tools/fromctx"
+	"github.com/akash-network/provider/tools/logging"
 	"github.com/akash-network/provider/tools/pconfig"
 	"github.com/akash-network/provider/tools/pconfig/bbolt"
 	"github.com/akash-network/provider/tools/pconfig/memory"
@@ -107,12 +108,13 @@ const (
 	FlagOwnedBuilderImagePullSecretName  = "owned-builder-image-pull-secret-name"
 	FlagBidTimeout                       = "bid-timeout"
 	FlagReclamationWindow                = "reclamation-window"
+	FlagReclamationRPCTimeout            = "reclamation-rpc-timeout"
+	FlagReclamationCloseRetryInterval    = "reclamation-close-retry-interval"
 	FlagManifestTimeout                  = "manifest-timeout"
 	FlagMetricsListener                  = "metrics-listener"
 	FlagPprofEnabled                     = "pprof-enabled"
 	FlagWithdrawalPeriod                 = "withdrawal-period"
 	FlagLeaseFundsMonitorInterval        = "lease-funds-monitor-interval"
-	FlagMinimumBalance                   = "minimum-balance"
 	FlagProviderConfig                   = "provider-config"
 	FlagCachedResultMaxAge               = "cached-result-max-age"
 	FlagRPCQueryTimeout                  = "rpc-query-timeout"
@@ -199,6 +201,21 @@ func TxPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// validateWithdrawalPeriod checks the --withdrawal-period value: 0 turns
+// withdrawals off, a negative period is rejected, and a positive one must be
+// at least the funds check interval.
+func validateWithdrawalPeriod(period, fundsCheckInterval time.Duration) error {
+	if period < 0 {
+		return fmt.Errorf(`flag "%s" value must be >= 0`, FlagWithdrawalPeriod) // nolint: err113
+	}
+
+	if period > 0 && period < fundsCheckInterval {
+		return fmt.Errorf(`flag "%s" value must be >= "%s"`, FlagWithdrawalPeriod, FlagLeaseFundsMonitorInterval) // nolint: err113
+	}
+
+	return nil
+}
+
 // RunCmd launches the Akash Provider service
 func RunCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -219,8 +236,8 @@ func RunCmd() *cobra.Command {
 				return fmt.Errorf(`flag "%s" contains invalid value. expected >=1m<=24h`, FlagLeaseFundsMonitorInterval) // nolint: err113
 			}
 
-			if withdrawPeriod > 0 && withdrawPeriod < leaseFundsMonInterval {
-				return fmt.Errorf(`flag "%s" value must be > "%s"`, FlagWithdrawalPeriod, FlagLeaseFundsMonitorInterval) // nolint: err113
+			if err := validateWithdrawalPeriod(withdrawPeriod, leaseFundsMonInterval); err != nil {
+				return err
 			}
 
 			if reclamationWindow < 0 {
@@ -229,10 +246,6 @@ func RunCmd() *cobra.Command {
 
 			if viper.GetDuration(FlagMonitorRetryPeriod) < 4*time.Second {
 				return fmt.Errorf(`flag "%s" value must be > "%s"`, FlagMonitorRetryPeriod, 4*time.Second) // nolint: err113
-			}
-
-			if err := providerflags.ValidateProxyBufferSize(viper.GetString(providerflags.FlagProxyBufferSize)); err != nil {
-				return err
 			}
 
 			pconfigBackend := viper.GetString(FlagPersistentConfigBackend)
@@ -263,7 +276,7 @@ func RunCmd() *cobra.Command {
 					return err
 				}
 			default:
-				return fmt.Errorf("unsupport persistent-config backend \"%s\"", pconfigBackend)
+				return fmt.Errorf("unsupported persistent-config backend \"%s\"", pconfigBackend)
 			}
 
 			if err := clientcommon.SetKubeConfigToCmd(cmd); err != nil {
@@ -287,9 +300,9 @@ func RunCmd() *cobra.Command {
 				return err
 			}
 
-			logger := log.NewLogger(os.Stderr)
+			logger := ctxlog.LogcFromCtx(cmd.Context())
 
-			kubeLog := logger.With("component", "k8s")
+			kubeLog := logger.With("module", "k8s")
 
 			// ideally following instantiation shall be placed within init function.
 			// however, the goal here to log under provider's context
@@ -299,7 +312,7 @@ func RunCmd() *cobra.Command {
 						return
 					}
 
-					kubeLog.Error(msg, "err", err, keysAndValues)
+					kubeLog.Error(msg, append([]any{"err", err}, keysAndValues...)...)
 				},
 			}
 
@@ -351,7 +364,6 @@ func RunCmd() *cobra.Command {
 
 			fromctx.CmdSetContextValue(cmd, fromctx.CtxKeyStartupCh, (chan<- struct{})(startupch))
 			fromctx.CmdSetContextValue(cmd, fromctx.CtxKeyErrGroup, group)
-			fromctx.CmdSetContextValue(cmd, fromctx.CtxKeyLogc, logger)
 			fromctx.CmdSetContextValue(cmd, fromctx.CtxKeyKubeClientSet, kc)
 			fromctx.CmdSetContextValue(cmd, fromctx.CtxKeyAkashClientSet, ac)
 			fromctx.CmdSetContextValue(cmd, fromctx.CtxKeyPersistentConfig, pstorage)
@@ -503,6 +515,8 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	deploymentRuntimeClass := viper.GetString(FlagDeploymentRuntimeClass)
 	bidTimeout := viper.GetDuration(FlagBidTimeout)
 	reclamationWindow := viper.GetDuration(FlagReclamationWindow)
+	reclamationRPCTimeout := viper.GetDuration(FlagReclamationRPCTimeout)
+	reclamationCloseRetryInterval := viper.GetDuration(FlagReclamationCloseRetryInterval)
 	manifestTimeout := viper.GetDuration(FlagManifestTimeout)
 	broadcastTimeout := viper.GetDuration(FlagTxBroadcastTimeout)
 	metricsListener := viper.GetString(FlagMetricsListener)
@@ -520,7 +534,7 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	logger := ctxlog.LogcFromCtx(cmd.Context())
+	logger := ctxlog.LogcFromCtx(cmd.Context()).With("module", "provider")
 
 	runMigrations := viper.GetBool(FlagMigrationsEnabled)
 	if runMigrations {
@@ -631,10 +645,10 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	}
 
 	logger.Info("provider ingress configuration",
-		"ingress-mode", ingressMode,
-		"gateway-name", gatewayName,
-		"gateway-namespace", gatewayNamespace,
-		"gateway-provider", gatewayProvider)
+		"ingress_mode", ingressMode,
+		"gateway_name", gatewayName,
+		"gateway_namespace", gatewayNamespace,
+		"gateway_provider", gatewayProvider)
 
 	if ingressMode == builder.IngressModeGateway {
 		if gatewayName == "" {
@@ -696,6 +710,12 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 
 	if reclamationWindow > 0 {
 		config.ReclamationWindow = &reclamationWindow
+	}
+	if reclamationRPCTimeout > 0 {
+		config.ReclamationRPCTimeout = reclamationRPCTimeout
+	}
+	if reclamationCloseRetryInterval > 0 {
+		config.ReclamationCloseRetryInterval = reclamationCloseRetryInterval
 	}
 	config.MonitorMaxRetries = monitorMaxRetries
 	config.MonitorRetryPeriod = monitorRetryPeriod
@@ -821,10 +841,14 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	evtSvc, err := events.NewEvents(ctx, cctx.Client, "provider-cli", bus)
+	evtSvc, err := newEventsService(ctx, cctx.NodeURI, bus, logger)
 	if err != nil {
 		return err
 	}
+
+	group.Go(func() error {
+		return watchEvents(ctx, evtSvc)
+	})
 
 	group.Go(func() error {
 		<-service.Done()
@@ -909,13 +933,17 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 
 		webhookLog := logger.With("module", "attestation-webhook")
 
-		var sidecarEnv []corev1.EnvVar
-		if viper.GetBool(FlagAttestationMockMode) {
+		mockMode := viper.GetBool(FlagAttestationMockMode)
+		if mockMode {
 			webhookLog.Info("attestation mock mode enabled — sidecar will produce synthetic reports")
-			sidecarEnv = append(sidecarEnv, corev1.EnvVar{
-				Name: "ATTESTATION_MOCK", Value: "true",
-			})
 		}
+
+		logCfg, ok := logging.ConfigFromCtx(cmd.Context())
+		if !ok {
+			logCfg = logging.DefaultConfig()
+		}
+
+		sidecarEnv := attestationSidecarEnv(logCfg, mockMode)
 
 		webhookSrv := attestwebhook.NewServer(attestwebhook.Config{
 			SidecarImage: sidecarImage,
@@ -954,7 +982,7 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 		}
 
 		group.Go(func() error {
-			logger.Info("starting attestation webhook", "addr", webhookAddr)
+			logger.Info("starting attestation webhook", "listen_addr", webhookAddr)
 			return webhookSrv.ListenAndServeTLS()
 		})
 
@@ -1006,6 +1034,34 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// newEventsService starts the chain event service on a connection of its own to the RPC
+// node at nodeURI, the node the rest of the provider uses, so its block fetches never
+// queue behind the provider's chain queries. It fails only if nodeURI is unusable or the
+// node does not answer a status query: a websocket it cannot reach is redialed in the
+// background while events keep flowing by polling, so it does not hold up startup. The
+// service adds "cmp" and "name" to the logger it is given, but not "module", so that is
+// bound here for the module filter to apply.
+func newEventsService(ctx context.Context, nodeURI string, bus pubsub.Bus, logger log.Logger) (events.Service, error) {
+	return events.NewEvents(ctx, nodeURI, "provider-cli", bus, events.WithLogger(logger.With("module", "events")))
+}
+
+// attestationSidecarEnv returns the environment injected into attestation sidecars:
+// the provider's logging configuration and, in mock mode, ATTESTATION_MOCK.
+func attestationSidecarEnv(logCfg logging.Config, mock bool) []corev1.EnvVar {
+	logEnv := logCfg.Env("ATTESTATION_")
+
+	env := make([]corev1.EnvVar, 0, len(logEnv)+1)
+	for _, e := range logEnv {
+		env = append(env, corev1.EnvVar{Name: e.Name, Value: e.Value})
+	}
+
+	if mock {
+		env = append(env, corev1.EnvVar{Name: "ATTESTATION_MOCK", Value: "true"})
+	}
+
+	return env
+}
+
 func runMigrationsOnStartup(ctx context.Context, cmd *cobra.Command, logger log.Logger) error {
 	statePath, err := determineStatePath(cmd)
 	if err != nil {
@@ -1034,7 +1090,7 @@ func createClusterClient(ctx context.Context, log log.Logger, _ *cobra.Command) 
 		return nil, fmt.Errorf("%w: --%s required", errInvalidConfig, providerflags.FlagK8sManifestNS)
 	}
 
-	return kube.NewClient(ctx, log, ns)
+	return kube.NewClient(ctx, log.With("module", "kube-client"), ns)
 }
 
 func showErrorToUser(err error) error {

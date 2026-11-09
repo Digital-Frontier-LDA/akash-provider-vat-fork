@@ -4,9 +4,6 @@ import (
 	"time"
 
 	"github.com/go-acme/lego/v4/lego"
-	mvbeta "pkg.akt.dev/go/node/market/v1beta5"
-
-	sdkmath "cosmossdk.io/math"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -200,6 +197,16 @@ func addRunFlags(cmd *cobra.Command) error {
 		return err
 	}
 
+	cmd.Flags().Duration(FlagReclamationRPCTimeout, 30*time.Second, "timeout for each chain RPC made while closing a reclaimed lease")
+	if err := viper.BindPFlag(FlagReclamationRPCTimeout, cmd.Flags().Lookup(FlagReclamationRPCTimeout)); err != nil {
+		return err
+	}
+
+	cmd.Flags().Duration(FlagReclamationCloseRetryInterval, time.Minute, "wait between retries when closing a reclaimed lease fails")
+	if err := viper.BindPFlag(FlagReclamationCloseRetryInterval, cmd.Flags().Lookup(FlagReclamationCloseRetryInterval)); err != nil {
+		return err
+	}
+
 	cmd.Flags().Duration(FlagManifestTimeout, 5*time.Minute, "time after which bids are cancelled if no manifest is received")
 	if err := viper.BindPFlag(FlagManifestTimeout, cmd.Flags().Lookup(FlagManifestTimeout)); err != nil {
 		return err
@@ -215,18 +222,13 @@ func addRunFlags(cmd *cobra.Command) error {
 		return err
 	}
 
-	cmd.Flags().Duration(FlagWithdrawalPeriod, time.Hour*24, "period at which withdrawals are made from the escrow accounts")
+	cmd.Flags().Duration(FlagWithdrawalPeriod, time.Hour*24, "period at which withdrawals are made from the escrow accounts. 0 turns withdrawals off: lease balances are still checked, but a lease out of funds stays open until its escrow is settled")
 	if err := viper.BindPFlag(FlagWithdrawalPeriod, cmd.Flags().Lookup(FlagWithdrawalPeriod)); err != nil {
 		return err
 	}
 
 	cmd.Flags().Duration(FlagLeaseFundsMonitorInterval, time.Minute*10, "interval at which lease is checked for funds available on the escrow accounts. >= 1m")
 	if err := viper.BindPFlag(FlagLeaseFundsMonitorInterval, cmd.Flags().Lookup(FlagLeaseFundsMonitorInterval)); err != nil {
-		return err
-	}
-
-	cmd.Flags().Uint64(FlagMinimumBalance, mvbeta.DefaultBidMinDeposit.Amount.Mul(sdkmath.NewIntFromUint64(2)).Uint64(), "minimum account balance at which withdrawal is started")
-	if err := viper.BindPFlag(FlagMinimumBalance, cmd.Flags().Lookup(FlagMinimumBalance)); err != nil {
 		return err
 	}
 
@@ -385,11 +387,6 @@ func addRunFlags(cmd *cobra.Command) error {
 
 	cmd.Flags().Bool(FlagAttestationMockMode, false, "Run attestation sidecar in mock mode (synthetic reports, no TEE hardware). For local development only")
 	if err := viper.BindPFlag(FlagAttestationMockMode, cmd.Flags().Lookup(FlagAttestationMockMode)); err != nil {
-		return err
-	}
-
-	cmd.Flags().String(providerflags.FlagProxyBufferSize, "16k", "NGINX proxy buffer size for upstream response headers")
-	if err := viper.BindPFlag(providerflags.FlagProxyBufferSize, cmd.Flags().Lookup(providerflags.FlagProxyBufferSize)); err != nil {
 		return err
 	}
 
