@@ -63,6 +63,12 @@ jobs:
         # otherwise inject shell into the runner).
         env:
           RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          # Since upstream v0.16.7, `make docker-image` depends on the `akt` target, which
+          # checks the akt installer with `gh attestation verify` and queries the GitHub API
+          # with this token. Without it gh refuses ("set the GH_TOKEN environment variable")
+          # and the build stops (run 42619465440). integration-tests.yaml's build-image step
+          # passes the same token.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           make docker-image \
             RELEASE_DOCKER_IMAGE=ghcr.io/digital-frontier-lda/akash-provider-vat-fork \
