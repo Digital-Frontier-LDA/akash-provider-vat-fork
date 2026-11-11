@@ -24,6 +24,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	dvbeta "pkg.akt.dev/go/node/deployment/v1beta4"
+	mtypes "pkg.akt.dev/go/node/market/v1"
 	attrtypes "pkg.akt.dev/go/node/types/attributes/v1"
 	rtypes "pkg.akt.dev/go/node/types/resources/v1beta4"
 	"pkg.akt.dev/go/node/types/unit"
@@ -680,6 +681,88 @@ func Test_ScriptPricingWritesJsonToStdin(t *testing.T) {
 		require.Equal(t, len(r.Endpoints), data.Resources[i].EndpointQuantity)
 		require.Equal(t, util.GetEndpointQuantityOfResourceUnits(r.Resources, rtypes.Endpoint_LEASED_IP), data.Resources[i].IPLeaseQuantity)
 	}
+}
+
+// writeEnvDumpScript writes a pricing script that records the order-id env
+// vars ("unset" when absent) and its stdin, then bids 1.
+func writeEnvDumpScript(t *testing.T) (scriptPath, envPath, stdinPath string) {
+	t.Helper()
+	tempdir := t.TempDir()
+	scriptPath = path.Join(tempdir, "test_script.sh")
+	envPath = path.Join(tempdir, "env.txt")
+	stdinPath = path.Join(tempdir, "stdin.json")
+	fout, err := os.OpenFile(scriptPath, os.O_WRONLY|os.O_CREATE, os.ModePerm)
+	require.NoError(t, err)
+	_, err = fmt.Fprintf(fout, `#!/bin/sh
+cat > %q
+printf '%%s|%%s|%%s|%%s' "${AKASH_DSEQ-unset}" "${AKASH_GSEQ-unset}" "${AKASH_OSEQ-unset}" "${AKASH_OWNER-unset}" > %q
+echo 1
+exit 0
+`, stdinPath, envPath)
+	require.NoError(t, err)
+	require.NoError(t, fout.Close())
+	return scriptPath, envPath, stdinPath
+}
+
+func Test_ScriptPricingExportsOrderIDToScript(t *testing.T) {
+	scriptPath, envPath, _ := writeEnvDumpScript(t)
+	pricing, err := MakeShellScriptPricing(scriptPath, 1, 30000*time.Millisecond)
+	require.NoError(t, err)
+
+	owner := testutil.AccAddress(t).String()
+	req := Request{
+		Owner: owner,
+		GSpec: defaultGroupSpec(),
+		// A Console-style dseq (a Unix time) and non-default group/order sequences.
+		OrderID: mtypes.OrderID{Owner: owner, DSeq: 1789974441432001, GSeq: 2, OSeq: 3},
+	}
+
+	price, err := pricing.CalculatePrice(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, sdkmath.LegacyNewDec(1), price.Amount)
+
+	got, err := os.ReadFile(envPath)
+	require.NoError(t, err)
+	require.Equal(t, "1789974441432001|2|3|"+owner, string(got))
+}
+
+func Test_ScriptPricingWithoutOrderIDExportsNoOrderEnv(t *testing.T) {
+	for _, name := range []string{"AKASH_DSEQ", "AKASH_GSEQ", "AKASH_OSEQ"} {
+		if _, set := os.LookupEnv(name); set {
+			t.Skipf("%s is set in the test environment", name)
+		}
+	}
+	scriptPath, envPath, _ := writeEnvDumpScript(t)
+	pricing, err := MakeShellScriptPricing(scriptPath, 1, 30000*time.Millisecond)
+	require.NoError(t, err)
+
+	owner := testutil.AccAddress(t).String()
+	_, err = pricing.CalculatePrice(context.Background(), Request{Owner: owner, GSpec: defaultGroupSpec()})
+	require.NoError(t, err)
+
+	got, err := os.ReadFile(envPath)
+	require.NoError(t, err)
+	require.Equal(t, "unset|unset|unset|"+owner, string(got))
+}
+
+func Test_ScriptPricingOrderIDDoesNotChangeStdin(t *testing.T) {
+	// One spec for both calls: defaultGroupSpec randomises its endpoints.
+	gspec := defaultGroupSpec()
+	read := func(oid mtypes.OrderID) []byte {
+		scriptPath, _, stdinPath := writeEnvDumpScript(t)
+		pricing, err := MakeShellScriptPricing(scriptPath, 1, 30000*time.Millisecond)
+		require.NoError(t, err)
+		_, err = pricing.CalculatePrice(context.Background(), Request{
+			Owner:   "akash1owner",
+			GSpec:   gspec,
+			OrderID: oid,
+		})
+		require.NoError(t, err)
+		b, err := os.ReadFile(stdinPath)
+		require.NoError(t, err)
+		return b
+	}
+	require.Equal(t, read(mtypes.OrderID{}), read(mtypes.OrderID{Owner: "akash1owner", DSeq: 29470519, GSeq: 1, OSeq: 1}))
 }
 
 func Test_ScriptPricingFromScript(t *testing.T) {

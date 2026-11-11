@@ -744,6 +744,28 @@ func Test_BidOrderUsesBidPricingStrategy(t *testing.T) {
 	scaffold.cluster.AssertCalled(t, "Unreserve", scaffold.orderID, mock.Anything)
 }
 
+// recordingBidPricingStrategy prices every order at 1 and keeps the request.
+type recordingBidPricingStrategy struct {
+	got chan Request
+}
+
+func (r recordingBidPricingStrategy) CalculatePrice(_ context.Context, req Request) (sdk.DecCoin, error) {
+	r.got <- req
+	return sdk.NewInt64DecCoin(sdkutil.DenomUact, 1), nil
+}
+
+func Test_BidOrderPassesOrderIDToPricing(t *testing.T) {
+	pricing := recordingBidPricingStrategy{got: make(chan Request, 1)}
+	order, scaffold, _ := makeOrderForTest(t, false, mvbeta.BidStateInvalid, pricing, nil, testBidCreatedAt)
+
+	req := testutil.ChannelWaitForValue(t, pricing.got).(Request)
+	require.Equal(t, scaffold.orderID, req.OrderID)
+
+	broadcast := testutil.ChannelWaitForValue(t, scaffold.broadcasts)
+	requireMsgType[*mvbeta.MsgCreateBid](t, broadcast)
+	order.lc.Shutdown(nil)
+}
+
 func (afbps alwaysFailsBidPricingStrategy) CalculatePrice(_ context.Context, _ Request) (sdk.DecCoin, error) {
 	return sdk.DecCoin{}, afbps.failure
 }

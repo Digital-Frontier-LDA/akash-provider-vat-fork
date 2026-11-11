@@ -13,6 +13,7 @@ import (
 
 	sdkmath "cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	mtypes "pkg.akt.dev/go/node/market/v1"
 	rtypes "pkg.akt.dev/go/node/types/resources/v1beta4"
 	"pkg.akt.dev/go/sdl"
 
@@ -156,6 +157,7 @@ func (ssp shellScriptPricing) CalculatePrice(ctx context.Context, r Request) (sd
 	subprocEnv := os.Environ()
 	subprocEnv = append(subprocEnv, fmt.Sprintf("AKASH_OWNER=%s", r.Owner))
 	subprocEnv = append(subprocEnv, fmt.Sprintf("AKASH_DENOM=%s", denom))
+	subprocEnv = append(subprocEnv, orderIDEnv(r.OrderID)...)
 	cmd.Env = subprocEnv
 
 	err := cmd.Run()
@@ -234,4 +236,25 @@ func newDataForScript(r Request) dataForScript {
 	}
 
 	return d
+}
+
+// orderIDEnv is the order's id for the pricing script. The deployer picks the
+// dseq: a block height (the CLI default) or a Unix time (Console and SDK
+// clients), so the script can date the order from it. An order the provider
+// re-lists when it restarts can be weeks or months old, and the provider has
+// already reserved capacity for it before pricing. A script that refuses to
+// price it releases that reservation at once instead of holding it until the
+// bid times out.
+//
+// A zero OrderID (no DSeq) exports nothing, so a caller that does not set it
+// gets exactly the environment it got before.
+func orderIDEnv(oid mtypes.OrderID) []string {
+	if oid.DSeq == 0 {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("AKASH_DSEQ=%d", oid.DSeq),
+		fmt.Sprintf("AKASH_GSEQ=%d", oid.GSeq),
+		fmt.Sprintf("AKASH_OSEQ=%d", oid.OSeq),
+	}
 }
