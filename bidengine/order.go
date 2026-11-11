@@ -409,6 +409,7 @@ loop:
 					GSpec:              &group.GroupSpec,
 					PricePrecision:     DefaultPricePrecision,
 					AllocatedResources: reservation.GetAllocatedResources(),
+					OrderID:            o.orderID,
 				}
 				return runner.NewResult(o.cfg.PricingStrategy.CalculatePrice(ctx, priceReq))
 			}, pricingDuration))

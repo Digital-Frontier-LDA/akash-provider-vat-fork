@@ -12,6 +12,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	dtypes "pkg.akt.dev/go/node/deployment/v1beta4"
+	mtypes "pkg.akt.dev/go/node/market/v1"
 	rtypes "pkg.akt.dev/go/node/types/resources/v1beta4"
 	"pkg.akt.dev/go/node/types/unit"
 	"pkg.akt.dev/go/sdl"
@@ -24,6 +25,12 @@ type Request struct {
 	GSpec              *dtypes.GroupSpec
 	AllocatedResources dtypes.ResourceUnits
 	PricePrecision     int
+	// OrderID is the order being priced. The shell script strategy exports it
+	// to the script as AKASH_DSEQ/AKASH_GSEQ/AKASH_OSEQ, so a pricing script
+	// can tell a fresh order from an old one the provider re-lists after a
+	// restart. A zero value exports nothing. It is not part of the script's
+	// stdin JSON, which newDataForScript builds separately.
+	OrderID mtypes.OrderID
 }
 
 const (
