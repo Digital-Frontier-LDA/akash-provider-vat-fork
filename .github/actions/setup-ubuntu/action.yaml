@@ -14,10 +14,20 @@ runs:
         fi
     - name: Install dependencies
       # Shell must explicitly specify the shell for each step. https://github.com/orgs/community/discussions/18597
+      #
+      # No `npm` here: "Setup npm" (actions/setup-node) below installs Node 18
+      # with its npm and puts it first on PATH, before .envrc's `has npm`
+      # check runs in "set environment". Ubuntu's npm package added ~400
+      # packages (nodejs, eslint, webpack and 383 node-*/libjs-*) that nothing
+      # used. On 2026-11-11 the runners could not resolve
+      # azure.archive.ubuntu.com, and apt waited ~20 s on each of those
+      # packages: this step ran 30-50+ min instead of ~1.5 min, on four
+      # attempts in a row. On the ubuntu-24.04 image only direnv, pv and
+      # libudev-dev are new now, so a mirror outage fails fast.
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y pkg-config make direnv unzip lz4 wget curl npm jq pv coreutils libudev-dev
+        sudo apt-get install -y pkg-config make direnv unzip lz4 wget curl jq pv coreutils libudev-dev
     - name: Install GitHub CLI
       # make akt verifies the akt installer with `gh attestation verify
       # --signer-workflow` (gh >= 2.51). gh is preinstalled only on
