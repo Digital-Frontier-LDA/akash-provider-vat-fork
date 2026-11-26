@@ -561,10 +561,13 @@ func teeTypeFromClusterParams(cp interface{}) ctypes.TEEType {
 	return ctypes.TEETypeNone
 }
 
-func (is *inventoryService) adjustOpts(teeType ctypes.TEEType) []ctypes.InventoryOption {
+func (is *inventoryService) adjustOpts(res *reservation) []ctypes.InventoryOption {
 	opts := []ctypes.InventoryOption{ctypes.WithTEEPlatform(is.teePlatform)}
-	if teeType != ctypes.TEETypeNone {
-		opts = append(opts, ctypes.WithTEEType(teeType))
+	if res.teeType != ctypes.TEETypeNone {
+		opts = append(opts, ctypes.WithTEEType(res.teeType))
+	}
+	if node := is.config.LeaseNodePlacement.NodeFor(res.OrderID().Owner, res.Resources().GetName()); node != "" {
+		opts = append(opts, ctypes.WithRequiredNode(node))
 	}
 	return opts
 }
@@ -601,7 +604,7 @@ func (is *inventoryService) handleRequest(req inventoryRequest, state *inventory
 	}
 
 	reservation.teeType = teeTypeFromResourceGroup(req.resources)
-	err := state.inventory.Adjust(reservation, is.adjustOpts(reservation.teeType)...)
+	err := state.inventory.Adjust(reservation, is.adjustOpts(reservation)...)
 	if err != nil {
 		log.Info("insufficient capacity for reservation")
 		inventoryRequestsCounter.WithLabelValues("reserve", "insufficient-capacity").Inc()
@@ -831,7 +834,7 @@ loop:
 			// readjust inventory accordingly with pending leases
 			for _, r := range state.reservations {
 				if !r.allocated {
-					if err := state.inventory.Adjust(r, is.adjustOpts(r.teeType)...); err != nil {
+					if err := state.inventory.Adjust(r, is.adjustOpts(r)...); err != nil {
 						is.log.Error("adjust inventory for pending reservation", "oid", r.OrderID(), "err", err)
 					}
 				}

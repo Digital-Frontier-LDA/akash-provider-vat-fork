@@ -502,6 +502,9 @@ func (inv *inventory) Adjust(reservation ctypes.ReservationGroup, opts ...ctypes
 
 nodes:
 	for nodeIdx := range currInventory.Nodes {
+		if cfg.RequiredNode != "" && currInventory.Nodes[nodeIdx].Name != cfg.RequiredNode {
+			continue
+		}
 		for i := len(resources) - 1; i >= 0; i-- {
 			adjustedGroup := false
 

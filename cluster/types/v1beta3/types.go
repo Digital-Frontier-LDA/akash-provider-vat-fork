@@ -171,9 +171,10 @@ const (
 )
 
 type InventoryOptions struct {
-	DryRun      bool
-	TEEType     TEEType
-	TEEPlatform TEEPlatform // detected at startup from node labels
+	DryRun       bool
+	TEEType      TEEType
+	TEEPlatform  TEEPlatform // detected at startup from node labels
+	RequiredNode string      // exact inventory node name; empty means any node
 }
 
 type InventoryOption func(*InventoryOptions) *InventoryOptions
@@ -195,6 +196,13 @@ func WithTEEType(t TEEType) InventoryOption {
 func WithTEEPlatform(t TEEPlatform) InventoryOption {
 	return func(opts *InventoryOptions) *InventoryOptions {
 		opts.TEEPlatform = t
+		return opts
+	}
+}
+
+func WithRequiredNode(node string) InventoryOption {
+	return func(opts *InventoryOptions) *InventoryOptions {
+		opts.RequiredNode = node
 		return opts
 	}
 }

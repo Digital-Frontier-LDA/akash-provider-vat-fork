@@ -187,6 +187,11 @@ func addRunFlags(cmd *cobra.Command) error {
 		return err
 	}
 
+	cmd.Flags().String(FlagLeaseNodePlacement, "", "restrict an operator-selected akash-owner/group to one Kubernetes node (akash-owner/group=node)")
+	if err := viper.BindPFlag(FlagLeaseNodePlacement, cmd.Flags().Lookup(FlagLeaseNodePlacement)); err != nil {
+		return err
+	}
+
 	cmd.Flags().Duration(FlagBidTimeout, 5*time.Minute, "time after which bids are cancelled if no lease is created")
 	if err := viper.BindPFlag(FlagBidTimeout, cmd.Flags().Lookup(FlagBidTimeout)); err != nil {
 		return err
