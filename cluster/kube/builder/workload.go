@@ -487,6 +487,16 @@ func (b *Workload) affinity() *corev1.Affinity {
 		},
 	}
 
+	// Match the Kubernetes object name used by inventory. The hostname label
+	// can differ from that name. Keep this in the same term as hardware checks.
+	if node := b.settings.LeaseNodePlacement.NodeFor(b.deployment.LeaseID().Owner, b.group.Name); node != "" {
+		affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchFields = []corev1.NodeSelectorRequirement{{
+			Key:      "metadata.name",
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{node},
+		}}
+	}
+
 	// Per-group anti-affinity. A service that opts into interconnect
 	// (implicit `interconnect: []` resolves to the `auto` group, explicit
 	// `interconnect: { group: <name> }` carries the chosen name) must

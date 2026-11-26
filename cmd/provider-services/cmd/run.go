@@ -55,6 +55,7 @@ import (
 	kubeinventory "github.com/akash-network/provider/cluster/kube/operators/clients/inventory"
 	kubeip "github.com/akash-network/provider/cluster/kube/operators/clients/ip"
 	attestwebhook "github.com/akash-network/provider/cluster/kube/webhook"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	cip "github.com/akash-network/provider/cluster/types/v1beta3/clients/ip"
 	clfromctx "github.com/akash-network/provider/cluster/types/v1beta3/fromctx"
 	providerflags "github.com/akash-network/provider/cmd/provider-services/cmd/flags"
@@ -105,6 +106,7 @@ const (
 	FlagAuthPem                          = "auth-pem"
 	FlagDeploymentRuntimeClass           = "deployment-runtime-class"
 	FlagOwnedBuilderImage                = "owned-builder-image"
+	FlagLeaseNodePlacement               = "lease-node-placement"
 	FlagOwnedBuilderImagePullSecretName  = "owned-builder-image-pull-secret-name"
 	FlagBidTimeout                       = "bid-timeout"
 	FlagReclamationWindow                = "reclamation-window"
@@ -575,8 +577,18 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 
 	pinfo := &res.Provider
 
+	leaseNodePlacement, err := ctypes.ParseLeaseNodePlacement(viper.GetString(FlagLeaseNodePlacement))
+	if err != nil {
+		return fmt.Errorf("--%s: %w", FlagLeaseNodePlacement, err)
+	}
+
+	if viper.GetString(FlagLeaseNodePlacement) != "" && !viper.GetBool(FlagClusterK8s) {
+		return fmt.Errorf("--%s requires --%s", FlagLeaseNodePlacement, FlagClusterK8s)
+	}
+
 	// k8s client creation
 	kubeSettings := builder.NewDefaultSettings()
+	kubeSettings.LeaseNodePlacement = leaseNodePlacement
 	kubeSettings.DeploymentIngressDomain = deploymentIngressDomain
 	kubeSettings.DeploymentIngressExposeLBHosts = deploymentIngressExposeLBHosts
 	kubeSettings.DeploymentIngressStaticHosts = deploymentIngressStaticHosts
@@ -739,6 +751,7 @@ func doRunCmd(ctx context.Context, cmd *cobra.Command, _ []string) error {
 
 	config.BidPricingStrategy = pricing
 	config.ClusterSettings = clusterSettings
+	config.LeaseNodePlacement = leaseNodePlacement
 	config.IngressMode = ingressMode
 	config.GatewayName = gatewayName
 	config.GatewayNamespace = gatewayNamespace

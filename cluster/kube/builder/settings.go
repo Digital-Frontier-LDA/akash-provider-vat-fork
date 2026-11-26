@@ -8,6 +8,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	vutil "pkg.akt.dev/node/v2/util/validation"
+
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 )
 
 // IngressMode represents the ingress mode for the cluster.
@@ -65,6 +67,8 @@ type Settings struct {
 	StorageCommitLevel float64
 
 	DeploymentRuntimeClass string
+
+	LeaseNodePlacement ctypes.LeaseNodePlacement
 
 	// OwnedBuilderImage enables the fixed owned BuildKit setup exception only
 	// when an operator pins its immutable image. Empty preserves the default

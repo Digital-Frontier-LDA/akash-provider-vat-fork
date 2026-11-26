@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/akash-network/provider/cluster/kube/builder"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 )
 
 type Config struct {
@@ -29,6 +30,7 @@ type Config struct {
 	ReclamationRPCTimeout           time.Duration
 	ReclamationCloseRetryInterval   time.Duration
 	ClusterSettings                 map[interface{}]interface{}
+	LeaseNodePlacement              ctypes.LeaseNodePlacement
 }
 
 func NewDefaultConfig() Config {
